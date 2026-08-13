@@ -25,7 +25,7 @@ The plugin is a second front door. Install it to make `navigate`, `read_page`, `
 /plugin install claude-in-chrome@claude-in-chrome-cli
 ```
 
-New Claude Code sessions get all the extension tools natively.
+New Claude Code sessions get all the extension tools natively, plus a skill ([`using-claude-in-chrome`](skills/using-claude-in-chrome/SKILL.md)) that teaches the agent when to prefer your real session over sessionless browser tools, and how to avoid the common traps.
 
 ### As a shell script
 

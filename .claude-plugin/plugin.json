@@ -1,6 +1,6 @@
 {
   "name": "claude-in-chrome",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Drive your real, logged-in Chrome from Claude Code. Exposes the Claude in Chrome extension's tab tools (navigate, read_page, find, computer, get_page_text, console, network) as MCP tools via the claude --claude-in-chrome-mcp bridge. Requires the Claude Code CLI on PATH and the Claude in Chrome extension connected to a running Chrome.",
   "author": {
     "name": "Hamza Hamidi"
