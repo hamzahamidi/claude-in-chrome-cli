@@ -1,6 +1,6 @@
 # claude-in-chrome-cli (`cic`)
 
-Call the tools from the **Claude in Chrome** extension straight from your shell, without writing an MCP client.
+Use the **Claude in Chrome** extension tools natively in Claude Code, or call them from your shell with `cic.sh`. Both connect through the same MCP server.
 
 ## Why
 
@@ -8,13 +8,26 @@ Claude Code ships a stdio MCP server, `claude --claude-in-chrome-mcp`, that brid
 
 Normally you reach those tools from inside a Claude session. Sometimes you just want one from a script or a terminal: a quick navigation, a page-text dump, a one-off step in a shell pipeline. `cic.sh` does that. It speaks the MCP handshake over stdio, calls one tool, prints the result, and exits.
 
+The plugin is a second front door. Install it to make `navigate`, `read_page`, `find`, `computer`, `get_page_text`, and the rest of the extension tools available natively in new Claude Code sessions.
+
 ## Requirements
 
 - The **Claude Code CLI** (`claude`) on your PATH.
 - The **Claude in Chrome** extension installed and connected to a running Chrome.
-- `python3` (parses the JSON-RPC reply).
+- `python3` (parses the JSON-RPC reply; `cic.sh` only).
 
 ## Install
+
+### As a Claude Code plugin
+
+```text
+/plugin marketplace add hamzahamidi/claude-in-chrome-cli
+/plugin install claude-in-chrome@claude-in-chrome-cli
+```
+
+New Claude Code sessions get all the extension tools natively.
+
+### As a shell script
 
 ```sh
 curl -O https://raw.githubusercontent.com/hamzahamidi/claude-in-chrome-cli/main/cic.sh

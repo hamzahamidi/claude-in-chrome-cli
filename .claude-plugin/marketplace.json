@@ -1,0 +1,15 @@
+{
+  "name": "claude-in-chrome-cli",
+  "description": "Tools from the Claude in Chrome extension, as a Claude Code plugin or a shell script.",
+  "owner": {
+    "name": "Hamza Hamidi"
+  },
+  "plugins": [
+    {
+      "name": "claude-in-chrome",
+      "source": "./",
+      "description": "Drive your real, logged-in Chrome from Claude Code via the Claude in Chrome extension.",
+      "category": "productivity"
+    }
+  ]
+}
