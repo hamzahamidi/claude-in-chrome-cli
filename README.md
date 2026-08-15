@@ -7,6 +7,8 @@
 
 Use the **Claude in Chrome** extension tools natively in Claude Code, or call them from your shell with `cic.sh`. Both connect through the same MCP server.
 
+![cic.sh listing the tools the Claude in Chrome extension exposes](docs/cic-demo.svg)
+
 ## Why
 
 Claude Code ships a stdio MCP server, `claude --claude-in-chrome-mcp`, that bridges to the Claude in Chrome extension. Through it you can drive your **real, logged-in** Chrome: navigate, read the page, click, type, run JavaScript, read the console and network.
