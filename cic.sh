@@ -67,7 +67,8 @@ for line in sys.stdin:
     ;;
   *)
     name="$1"
-    args="${2:-{}}"
+    # Quotes are required: ${2:-{}} parses as ${2:-{} followed by a literal }.
+    args=${2:-"{}"}
     wait="${3:-8}"
     emit_rpc "tools/call" "{\"name\":\"$name\",\"arguments\":$args}" "$wait" \
       | claude --claude-in-chrome-mcp 2>/dev/null | python3 -c '
