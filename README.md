@@ -7,7 +7,7 @@
 
 Use the **Claude in Chrome** extension tools natively in Claude Code, or call them from your shell with `cic.sh`. Both connect through the same MCP server.
 
-![cic.sh listing the tools the Claude in Chrome extension exposes](docs/cic-demo.svg)
+<img src="docs/cic-demo.png" alt="cic.sh listing the tools the Claude in Chrome extension exposes" width="860">
 
 ## Why
 
