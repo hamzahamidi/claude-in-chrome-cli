@@ -47,6 +47,7 @@ case "${1:-}" in
   -l|--list|list)
     emit_rpc "tools/list" '{}' "${2:-6}" | claude --claude-in-chrome-mcp 2>/dev/null | python3 -c '
 import json, sys
+seen = False
 for line in sys.stdin:
     line = line.strip()
     if not line:
@@ -57,12 +58,15 @@ for line in sys.stdin:
         continue
     if d.get("id") != 2:
         continue
+    seen = True
     if "error" in d:
         print("ERROR:", json.dumps(d["error"]))
         break
     for t in d.get("result", {}).get("tools", []):
         desc = (t.get("description") or "").splitlines()
         print("-", t["name"], "::", (desc[0][:80] if desc else ""))
+if not seen:
+    sys.exit("cic: no reply from the bridge. Raise wait_secs, or check that the Claude in Chrome extension is connected.")
 '
     ;;
   *)
