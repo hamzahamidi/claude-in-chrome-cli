@@ -73,6 +73,7 @@ for line in sys.stdin:
     emit_rpc "tools/call" "{\"name\":\"$name\",\"arguments\":$args}" "$wait" \
       | claude --claude-in-chrome-mcp 2>/dev/null | python3 -c '
 import json, sys
+seen = False
 for line in sys.stdin:
     line = line.strip()
     if not line:
@@ -83,6 +84,7 @@ for line in sys.stdin:
         continue
     if d.get("id") != 2:
         continue
+    seen = True
     if "error" in d:
         print("ERROR:", json.dumps(d["error"]))
         break
@@ -90,6 +92,8 @@ for line in sys.stdin:
         print(c.get("text") if c.get("type") == "text" else "[" + c.get("type", "?") + "]")
     if d.get("result", {}).get("isError"):
         print("(isError=true)")
+if not seen:
+    sys.exit("cic: no reply from the bridge. Raise wait_secs, or check that the Claude in Chrome extension is connected.")
 '
     ;;
 esac
