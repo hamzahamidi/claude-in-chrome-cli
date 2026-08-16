@@ -7,7 +7,7 @@
 
 Use the **Claude in Chrome** extension tools natively in Claude Code, or call them from your shell with `cic.sh`. Both connect through the same MCP server.
 
-<img src="docs/cic-demo.png" alt="cic.sh listing the tools the Claude in Chrome extension exposes" width="860">
+![cic.sh listing the tools the Claude in Chrome extension exposes](docs/cic-demo.png)
 
 ## Why
 
@@ -56,18 +56,22 @@ chmod +x cic.sh
 # See what tools the extension exposes
 ./cic.sh --list
 
-# Open a page in your logged-in Chrome
-./cic.sh navigate '{"url":"https://example.com"}'
+# Make a tab of your own. It prints "Created new tab. Tab ID: 2099038679"
+./cic.sh tabs_create_mcp '{}'
 
-# Dump the readable text of the current page
-./cic.sh get_page_text '{}' 5
+# Then pass that id to every tool that acts on a page
+./cic.sh navigate '{"url":"https://example.com","tabId":2099038679}'
+./cic.sh get_page_text '{"tabId":2099038679}' 5
+./cic.sh computer '{"action":"screenshot","tabId":2099038679}'
+./cic.sh javascript_tool '{"action":"javascript_exec","text":"document.title","tabId":2099038679}'
 
-# Take a screenshot
-./cic.sh computer '{"action":"screenshot"}'
-
-# Run JavaScript in the page
-./cic.sh javascript_tool '{"code":"document.title"}'
+# Close it when you are done
+./cic.sh tabs_close_mcp '{"tabId":2099038679}'
 ```
+
+`tabId` is required here. Each `cic.sh` call is its own MCP session, so the session starts with an empty tab group and a tool that acts on a page answers `No tab available` without one. `--list` and `tabs_context_mcp` are the exceptions, since neither touches a page.
+
+Never pass the id of a tab you are working in. `tabs_context_mcp` lists every tab the extension can see, including yours.
 
 ## Tools
 
