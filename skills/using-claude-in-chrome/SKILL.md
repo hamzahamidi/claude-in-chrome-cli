@@ -22,6 +22,7 @@ If the task needs the user's identity or an existing session, a sessionless brow
 - From a shell, a script, a cron job, or an agent that cannot hold an MCP connection: use `${CLAUDE_PLUGIN_ROOT}/cic.sh`. It speaks the same MCP handshake over stdio to `claude --claude-in-chrome-mcp`.
   - `cic.sh --list` lists the available tools
   - `cic.sh <tool_name> '<json-args>' [wait_secs]` calls one
+  - Each call is its own MCP session, so its tab group starts empty. Create a tab with `cic.sh tabs_create_mcp '{}'` and pass the id it prints to every later call, or the tool answers `No tab available`. Inside a Claude Code session the MCP tools keep one group, so this does not apply there.
 
 Never enter the user's credentials to force a session. Ask them to complete SSO in that Chrome window instead.
 
