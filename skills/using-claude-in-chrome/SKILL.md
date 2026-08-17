@@ -1,9 +1,17 @@
 ---
 name: using-claude-in-chrome
-description: Use before controlling Chrome for anything that needs the user's real login session (a tool behind SSO, a Slack UI action, any cookie-gated page) and whenever another browser tool lands on a login page, returns an empty or anonymous-looking page, or seems to have lost a session that worked a moment ago. Also use when scripting browser control from a shell, a cron job, or an agent that cannot hold an MCP connection.
+description: Use before controlling Chrome for anything that needs the user's real login session (a tool behind SSO, a Slack UI action, any cookie-gated page) and whenever another browser tool lands on a login page, returns an empty or anonymous-looking page, or seems to have lost a session that worked a moment ago. Also use when scripting browser control from a shell, a cron job, or an agent that cannot hold an MCP connection. Also use when asked what is currently open in Chrome (how many tabs, is a page open anywhere, which one was being looked at), which `list_open_tabs` answers from the profile on disk without driving a browser.
 ---
 
 # Using Claude in Chrome
+
+## First: is the question "what is open?"
+
+Then do not drive a browser at all. Call **`list_open_tabs`**, from the `chrome-tabs` server this plugin ships. It reads Chrome's session file from disk, so it sees every tab in every window and every profile, with no debugging port, no extension and no tab group. Measured on one machine: the bridge could see 4 tabs, `list_open_tabs` saw 29, of which 25 were outside the group.
+
+Pass `include_urls: false` for counts and hosts only, or `profile` to narrow to one Chrome profile.
+
+It returns URLs and titles, not page content, and it cannot drive a page. For either of those, read on.
 
 ## Overview
 
@@ -32,7 +40,7 @@ Never enter the user's credentials to force a session. Ask them to complete SSO 
 ## Mechanics
 
 - **List tabs and create your own.** Call `tabs_context_mcp` first; the automated tab group can hold pages the user is working in. Never navigate a tab you did not create.
-- **The tab group is the only axis. Windows are irrelevant.** `tabs_context_mcp` returns the group's tabs and nothing else, so a tab the user has open elsewhere is invisible whatever window it sits in, and nothing adopts it: there is no move tool, no "all windows" flag, and `select_browser` picks a browser rather than a tab. Asking the user to switch windows cannot work. To *read* what they have open, do not drive a browser at all: parse Chrome's own session file, `<profile>/Sessions/Session_*`, newest by mtime, SNSS format. It needs no port and no group. To *drive* one of those tabs, attach (below).
+- **The tab group is the only axis. Windows are irrelevant.** `tabs_context_mcp` returns the group's tabs and nothing else, so a tab the user has open elsewhere is invisible whatever window it sits in, and nothing adopts it: there is no move tool, no "all windows" flag, and `select_browser` picks a browser rather than a tab. Asking the user to switch windows cannot work. To *read* what they have open, call `list_open_tabs` instead of driving anything. To *drive* one of those tabs, attach (below).
 - **To reach a page the user already has open, re-open it.** `tabs_create_mcp` then `navigate` to the same URL gets the same profile and the same cookies at no cost to the user. Anything you would reload anyway, a performance measurement for instance, never needs their original tab.
 - **The bridge cannot open `chrome://` URLs.** `navigate` prefixes the scheme and lands on `https://chrome://…`. Ask the user to open those pages themselves.
 - **Navigate, then verify in a separate call.** A navigate can report success while the tab stays on `chrome://newtab`. Check `location.hostname` before acting.

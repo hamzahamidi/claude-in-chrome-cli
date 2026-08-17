@@ -17,6 +17,8 @@ Normally you reach those tools from inside a Claude session. Sometimes you just 
 
 The plugin is a second front door. Install it to make `navigate`, `read_page`, `find`, `computer`, `get_page_text`, and the rest of the extension tools available natively in new Claude Code sessions.
 
+It also adds one tool the extension cannot provide. The bridge only ever sees tabs inside its own tab group, so "what have I got open?" is unanswerable through it. `list_open_tabs` answers it by reading Chrome's session file from disk, with no debugging port, no extension and no tab group. Measured on one machine: the bridge could see 4 tabs, `list_open_tabs` saw 29, of which 25 were outside the group. It reads URLs and titles, not page content, and it cannot drive a page.
+
 Where this is going, release by release: see the [roadmap](ROADMAP.md).
 
 ## Requirements
@@ -24,6 +26,7 @@ Where this is going, release by release: see the [roadmap](ROADMAP.md).
 - The **Claude Code CLI** (`claude`) on your PATH.
 - The **Claude in Chrome** extension installed and connected to a running Chrome.
 - `python3` (parses the JSON-RPC reply; `cic.sh` only).
+- **Node.js 22 or later**, for the `chrome-tabs` server behind `list_open_tabs`.
 
 ## Install
 
@@ -95,6 +98,14 @@ The exact set depends on your extension version. Run `./cic.sh --list` for the l
 | `list_connected_browsers` / `select_browser` / `switch_browser` | Pick which Chrome to drive |
 
 Argument shapes come from the extension, not from this script. The `--list` output includes each tool's description, which documents its arguments.
+
+One tool does not come from the extension. The plugin ships [`tabs_mcp.py`](tabs_mcp.py) as a second MCP server, `chrome-tabs`:
+
+| Tool | What it does |
+| --- | --- |
+| `list_open_tabs` | Every tab in every window and profile, read from Chrome's session file on disk |
+
+It takes an optional `profile` to narrow to one Chrome profile, and `include_urls: false` to get counts and hosts without the per-tab list. It is read only, needs nothing running, and is the answer whenever the question is "what is open" rather than "drive this page". It is not available through `cic.sh`, which talks to the extension bridge instead.
 
 ## How it works
 
