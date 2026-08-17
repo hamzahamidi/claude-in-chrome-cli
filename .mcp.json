@@ -5,8 +5,8 @@
       "args": ["--claude-in-chrome-mcp"]
     },
     "chrome-tabs": {
-      "command": "python3",
-      "args": ["${CLAUDE_PLUGIN_ROOT}/tabs_mcp.py"]
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/tabs_mcp.js"]
     }
   }
 }

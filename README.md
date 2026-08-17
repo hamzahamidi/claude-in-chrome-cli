@@ -99,13 +99,13 @@ The exact set depends on your extension version. Run `./cic.sh --list` for the l
 
 Argument shapes come from the extension, not from this script. The `--list` output includes each tool's description, which documents its arguments.
 
-One tool does not come from the extension. The plugin ships [`tabs_mcp.py`](tabs_mcp.py) as a second MCP server, `chrome-tabs`:
+One tool does not come from the extension. The plugin ships [`tabs_mcp.js`](tabs_mcp.js) as a second MCP server, `chrome-tabs`:
 
 | Tool | What it does |
 | --- | --- |
 | `list_open_tabs` | Every tab in every window and profile, read from Chrome's session file on disk |
 
-It takes an optional `profile` to narrow to one Chrome profile, and `include_urls: false` to get counts and hosts without the per-tab list. It is read only, needs nothing running, and is the answer whenever the question is "what is open" rather than "drive this page". It is not available through `cic.sh`, which talks to the extension bridge instead.
+It takes an optional `profile` to narrow to one Chrome profile, and `include_urls: false` to get counts and hosts without the per-tab list. URLs are redacted by default to origin and path, since a raw URL read straight off disk can carry a token, a session id or a query string the extension bridge's own redaction would have caught; pass `full_urls: true` to get the raw URL. It reads every profile on the machine, not just the one the bridge happens to be using. It is read only, needs nothing running, and is the answer whenever the question is "what is open" rather than "drive this page". It is not available through `cic.sh`, which talks to the extension bridge instead.
 
 ## How it works
 

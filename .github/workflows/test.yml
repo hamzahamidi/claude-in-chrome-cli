@@ -1,0 +1,28 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: cic.sh request-side JSON
+        run: sh test/test_request_json.sh
+      - name: chrome-tabs SNSS parser
+        run: node test/test_tabs_parser.js
+      - name: chrome-tabs MCP handshake
+        run: sh test/test_tabs_mcp.sh
+      - name: server version matches plugin.json
+        run: |
+          plugin_version=$(node -p "require('./.claude-plugin/plugin.json').version")
+          server_version=$(node -p "require('./tabs_mcp.js').SERVER_VERSION")
+          echo "plugin.json: $plugin_version"
+          echo "tabs_mcp.js: $server_version"
+          test "$plugin_version" = "$server_version"
