@@ -27,6 +27,13 @@ const CMD_SET_SELECTED_NAVIGATION_INDEX = 7;
 const CMD_TAB_CLOSED = 16;
 const CMD_WINDOW_CLOSED = 17;
 
+// chromium/components/sessions/core/session_backend.cc kFileCurrentVersion.
+// 3 is the current cleartext format, confirmed against a real session file
+// on this machine. Version 5 is encrypted and unreadable by this parser
+// regardless; any version this parser has not confirmed is treated the same
+// way, fail closed, rather than assumed compatible.
+const SNSS_CURRENT_VERSION = 3;
+
 const utf8Decoder = new TextDecoder('utf-8', { fatal: true });
 const utf16Decoder = new TextDecoder('utf-16le', { fatal: true });
 
@@ -81,8 +88,23 @@ function sessionFilesNewestFirst(userDataDir, profile) {
   } catch {
     return [];
   }
-  const files = names.filter((n) => n.startsWith('Session_')).map((n) => path.join(dir, n));
-  return files.sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
+  // Stat once per file up front, outside the comparator: Chrome can remove
+  // or replace a session file at any time, and an unguarded statSync inside
+  // Array.sort throws mid-sort, which crashes before collect() ever gets a
+  // chance to fall back to an older file.
+  const stated = names
+    .filter((n) => n.startsWith('Session_'))
+    .map((n) => path.join(dir, n))
+    .map((f) => {
+      try {
+        return { file: f, mtimeMs: fs.statSync(f).mtimeMs };
+      } catch {
+        return null;
+      }
+    })
+    .filter(Boolean);
+  stated.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  return stated.map((s) => s.file);
 }
 
 function aligned(n) {
@@ -90,13 +112,19 @@ function aligned(n) {
 }
 
 // SNSS is a magic + version header, then uint16-length-prefixed commands.
-// validMagic false means this is not a session file this parser recognizes
-// at all. truncated true means it started as one but a record's declared
-// size ran past the end of the file, e.g. Chrome was killed mid-write: the
-// records collected up to that point are still returned.
+// validMagic false means this is not a file this parser can read at all,
+// whether because the magic is wrong or the version is one it has not
+// confirmed. truncated true means it started as a version it understands
+// but a record's declared size ran past the end of the file, or the file
+// ended with leftover bytes too short to even hold a length prefix: either
+// way, a record was cut off mid-write. Records collected before that point
+// are still returned.
 function readRecords(buf) {
   const records = [];
   if (buf.length < 8 || buf.toString('latin1', 0, 4) !== 'SNSS') {
+    return { records, validMagic: false, truncated: false };
+  }
+  if (buf.readUInt32LE(4) !== SNSS_CURRENT_VERSION) {
     return { records, validMagic: false, truncated: false };
   }
   let off = 8;
@@ -109,7 +137,7 @@ function readRecords(buf) {
     records.push([buf[off], buf.subarray(off + 1, off + size)]);
     off += size;
   }
-  return { records, validMagic: true, truncated: false };
+  return { records, validMagic: true, truncated: off < buf.length };
 }
 
 // Pickle layout: size, tab id, nav index, then url (utf-8) and title (utf-16).
@@ -240,13 +268,16 @@ function hostnameOf(url) {
   }
 }
 
-// Scheme-aware. Credentials, query strings and fragments are always
-// stripped, since a raw URL can carry a token or session id that the
-// extension bridge's own redaction would have caught. Beyond that:
-// data: URIs keep only their media type, since the payload after the comma
-// is arbitrary embedded content rather than a page address; every other
-// scheme keeps its host (when it has one) and path, which covers chrome:,
-// chrome-extension: and file: as well as http(s).
+// Schemes confirmed safe to show host and path for. Anything not on this
+// list renders as the bare scheme: an allowlist, not a blocklist, because a
+// wrapper scheme like blob:, filesystem: or view-source: puts another URL,
+// credentials and all, directly in its own pathname. Enumerating wrapper
+// schemes one at a time never terminates; this bounds the problem instead.
+const HOST_SAFE_SCHEMES = new Set(['http:', 'https:', 'chrome:', 'chrome-extension:']);
+
+// Credentials, query strings and fragments are always stripped, since a raw
+// URL can carry a token or session id that the extension bridge's own
+// redaction would have caught.
 function redactUrl(url) {
   let u;
   try {
@@ -255,15 +286,20 @@ function redactUrl(url) {
     return '(unparseable)';
   }
   if (u.protocol === 'data:') {
+    // The payload after the comma is arbitrary embedded content, not a page
+    // address; only the media type before it is safe to show.
     return `data:${u.pathname.split(',')[0]},[redacted]`;
   }
   if (u.protocol === 'file:') {
     return `file://${u.pathname}`;
   }
-  if (u.host) {
+  if (u.protocol === 'about:') {
+    return `about:${u.pathname}`;
+  }
+  if (HOST_SAFE_SCHEMES.has(u.protocol) && u.host) {
     return `${u.protocol}//${u.host}${u.pathname}`;
   }
-  return `${u.protocol}${u.pathname}`;
+  return u.protocol;
 }
 
 function render(groups, { includeUrls = true, fullUrls = false } = {}) {
@@ -337,11 +373,15 @@ const TOOLS = [
       "Claude in Chrome bridge cannot, and it is not limited to one profile. Use " +
       'it for any read-only question about what is open. It cannot drive a page, ' +
       'and it does not track which tab or window currently has focus, only which ' +
-      'page each tab is on. URLs are redacted by default to origin and path only, ' +
-      'with credentials, query strings and fragments stripped, since a raw URL ' +
-      "can carry a token or session id that the bridge's own redaction would " +
-      'have caught. Pass full_urls to get the raw URL instead. A profile whose ' +
-      'session file is unreadable is reported as such, not silently as empty.',
+      'page each tab is on: for a tab whose history was pruned (not just navigated ' +
+      'back and forth), the reported page can be stale. URLs are redacted by ' +
+      'default to origin and path for known-safe schemes only, with credentials, ' +
+      'query strings and fragments always stripped; an unrecognized or wrapper ' +
+      "scheme (blob:, filesystem:, view-source:) shows only its scheme, since its " +
+      'path can itself be another URL with credentials embedded. Pass full_urls ' +
+      'to get the raw URL instead. This is a best-effort reader of an undocumented ' +
+      'Chromium format: a session file in a version this parser has not confirmed, ' +
+      'or one cut off mid-write, is reported as unreadable rather than as empty.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -428,5 +468,7 @@ module.exports = {
   redactUrl,
   aligned,
   userDataDirs,
+  sessionFilesNewestFirst,
   SERVER_VERSION,
+  SNSS_CURRENT_VERSION,
 };

@@ -20,7 +20,7 @@ const {
   rawRecord,
   buildSession,
 } = require('./fixtures/build_snss.js');
-const { parseSession, render, redactUrl, userDataDirs } = require('../tabs_mcp.js');
+const { parseSession, readRecords, render, redactUrl, userDataDirs, sessionFilesNewestFirst } = require('../tabs_mcp.js');
 
 let fails = 0;
 
@@ -185,6 +185,43 @@ check('non-SNSS magic bytes are reported as an unrecognized format, not truncate
   });
 });
 
+check('an obsolete version number is unreadable, not silently trusted', () => {
+  withSessionFile([], (file) => {
+    fs.writeFileSync(file, buildSession([], 1)); // version 1 predates the current format
+    const result = parseSession(file);
+    assert.strictEqual(result.validMagic, false);
+  });
+});
+
+check('the encrypted version (5) is unreadable, not silently trusted', () => {
+  withSessionFile([], (file) => {
+    fs.writeFileSync(file, buildSession([], 5));
+    const result = parseSession(file);
+    assert.strictEqual(result.validMagic, false);
+  });
+});
+
+check('an unrecognized version number fails closed rather than being guessed at', () => {
+  withSessionFile([], (file) => {
+    fs.writeFileSync(file, buildSession([], 99));
+    const result = parseSession(file);
+    assert.strictEqual(result.validMagic, false);
+  });
+});
+
+check('a file cut off between records (no room for even a length prefix) is truncated, not clean', () => {
+  const buf = readRecords(Buffer.concat([Buffer.from('SNSS', 'latin1'), Buffer.from([3, 0, 0, 0]), Buffer.from([0xab])]));
+  assert.strictEqual(buf.validMagic, true);
+  assert.strictEqual(buf.truncated, true);
+});
+
+check('a file that ends exactly on a record boundary is clean, not truncated', () => {
+  withSessionFile([setTabWindow(1, 101)], (file) => {
+    const result = parseSession(file);
+    assert.strictEqual(result.truncated, false);
+  });
+});
+
 check('render redacts credentials, query and fragment by default', () => {
   const groups = [
     {
@@ -274,6 +311,23 @@ check('redactUrl strips the payload of a data: url but keeps the media type', ()
   assert.ok(!shown.includes('SGVsbG8'), shown);
 });
 
+check('redactUrl shows only the scheme for blob:, which wraps a full url with credentials', () => {
+  const shown = redactUrl('blob:https://user:pass@example.com/id?x=1');
+  assert.strictEqual(shown, 'blob:');
+  assert.ok(!shown.includes('user:pass'), shown);
+  assert.ok(!shown.includes('example.com'), shown);
+});
+
+check('redactUrl shows only the scheme for filesystem:, same wrapper problem as blob:', () => {
+  const shown = redactUrl('filesystem:https://user:pass@example.com/temporary/x?y=1');
+  assert.strictEqual(shown, 'filesystem:');
+});
+
+check('redactUrl shows only the scheme for view-source:, same wrapper problem as blob:', () => {
+  const shown = redactUrl('view-source:https://user:pass@example.com/a?b=1');
+  assert.strictEqual(shown, 'view-source:');
+});
+
 check('redactUrl falls back to (unparseable) on an invalid url', () => {
   assert.strictEqual(redactUrl('not a url'), '(unparseable)');
 });
@@ -345,6 +399,30 @@ check('userDataDirs returns nothing for a platform with no installed browser', (
   try {
     assert.deepStrictEqual(userDataDirs('linux', {}, root), []);
   } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+check('sessionFilesNewestFirst survives a file disappearing between listing and stat', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'race-'));
+  const dir = path.join(root, 'Default', 'Sessions');
+  fs.mkdirSync(dir, { recursive: true });
+  const kept = path.join(dir, 'Session_kept');
+  const vanished = path.join(dir, 'Session_vanished');
+  fs.writeFileSync(kept, 'x');
+  fs.writeFileSync(vanished, 'x');
+  const realStatSync = fs.statSync;
+  fs.statSync = (p, ...rest) => {
+    if (p === vanished) throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    return realStatSync(p, ...rest);
+  };
+  try {
+    assert.doesNotThrow(() => {
+      const files = sessionFilesNewestFirst(root, 'Default');
+      assert.deepStrictEqual(files, [kept]);
+    });
+  } finally {
+    fs.statSync = realStatSync;
     fs.rmSync(root, { recursive: true, force: true });
   }
 });

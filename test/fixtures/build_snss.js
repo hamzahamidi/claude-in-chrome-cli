@@ -77,8 +77,10 @@ function rawRecord(cmd, payload) {
   return encodeRecord(cmd, payload);
 }
 
-function buildSession(records) {
-  const header = Buffer.concat([Buffer.from('SNSS', 'latin1'), Buffer.from([1, 0, 0, 0])]);
+// Version 3, confirmed against a real Chrome session file on the machine
+// this test suite was written on: tabs_mcp.js only accepts this version.
+function buildSession(records, version = 3) {
+  const header = Buffer.concat([Buffer.from('SNSS', 'latin1'), Buffer.from([version, 0, 0, 0])]);
   return Buffer.concat([header, ...records]);
 }
 
