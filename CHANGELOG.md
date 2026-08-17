@@ -12,6 +12,8 @@ Redaction is now an allowlist rather than a blocklist: only schemes confirmed sa
 
 Known limitation, not implemented: Chrome's history-pruning commands (forward history dropped after a new navigation, entries pruned from either end) are not modeled, so the selected-navigation-index fix above can still be wrong for a tab whose history was pruned rather than just navigated back and forth. Every command id present across a real, actively-used session file on the machine this was built on was checked; the pruning commands were not among them, so this is documented rather than implemented.
 
+Fixes two more gaps in what counted as a trustworthy file. A byte-complete, correctly-versioned file was still accepted even without Chrome's own completion marker, which Chrome itself requires before treating a snapshot as valid; confirmed the marker's presence on all three real profiles on this machine (exactly one each) before requiring it here too. A profile that has moved to Chrome's separate encrypted session storage (`Sessions_Encrypted`, a staged rollout) was previously invisible to profile discovery entirely, reported the same as a profile with no data at all; it now gets its own status, distinct from both "empty" and "unreadable", since it is a permanent, by-design gap rather than a corrupt or missing file. Also fixes a UNC `file://server/share/...` URL losing its server name during redaction.
+
 Adds a GitHub Actions workflow running the test suite on every push, and a check that `tabs_mcp.js`'s version constant matches `plugin.json`.
 
 ## 0.2.3 (2026-08-17)

@@ -12,6 +12,7 @@ const CMD_UPDATE_TAB_NAVIGATION = 6;
 const CMD_SET_SELECTED_NAVIGATION_INDEX = 7;
 const CMD_TAB_CLOSED = 16;
 const CMD_WINDOW_CLOSED = 17;
+const CMD_INITIAL_STATE_MARKER = 255;
 
 function aligned(n) {
   return n + ((4 - (n % 4)) % 4);
@@ -77,11 +78,20 @@ function rawRecord(cmd, payload) {
   return encodeRecord(cmd, payload);
 }
 
+// chromium's kInitialStateMarkerCommandId, empty payload. Chromium writes
+// this once, when the initial snapshot finishes, and will not treat a file
+// lacking it as valid. Included in buildSession by default; opt out with
+// marker: false for tests specifically about its absence.
+function initialStateMarker() {
+  return encodeRecord(CMD_INITIAL_STATE_MARKER, Buffer.alloc(0));
+}
+
 // Version 3, confirmed against a real Chrome session file on the machine
 // this test suite was written on: tabs_mcp.js only accepts this version.
-function buildSession(records, version = 3) {
+function buildSession(records, version = 3, marker = true) {
   const header = Buffer.concat([Buffer.from('SNSS', 'latin1'), Buffer.from([version, 0, 0, 0])]);
-  return Buffer.concat([header, ...records]);
+  const allRecords = marker ? [...records, initialStateMarker()] : records;
+  return Buffer.concat([header, ...allRecords]);
 }
 
 module.exports = {
@@ -91,6 +101,7 @@ module.exports = {
   updateTabNavigation,
   setSelectedNavigationIndex,
   rawRecord,
+  initialStateMarker,
   buildSession,
   aligned,
 };

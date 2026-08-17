@@ -20,7 +20,17 @@ const {
   rawRecord,
   buildSession,
 } = require('./fixtures/build_snss.js');
-const { parseSession, readRecords, render, redactUrl, userDataDirs, sessionFilesNewestFirst } = require('../tabs_mcp.js');
+const {
+  parseSession,
+  readRecords,
+  render,
+  redactUrl,
+  userDataDirs,
+  sessionFilesNewestFirst,
+  profileDirs,
+  hasEncryptedSessionData,
+  ENCRYPTED_SESSIONS_DIR,
+} = require('../tabs_mcp.js');
 
 let fails = 0;
 
@@ -222,6 +232,28 @@ check('a file that ends exactly on a record boundary is clean, not truncated', (
   });
 });
 
+check('a byte-complete file is valid when it carries the completion marker (the default)', () => {
+  withSessionFile([setTabWindow(1, 101), updateTabNavigation(101, 0, 'https://example.com/', 'T')], (file) => {
+    const result = parseSession(file);
+    assert.strictEqual(result.validMagic, true);
+  });
+});
+
+check('a byte-complete file without the completion marker is not trusted', () => {
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'snss-')), 'Session_1');
+  fs.writeFileSync(
+    file,
+    buildSession([setTabWindow(1, 101), updateTabNavigation(101, 0, 'https://example.com/', 'T')], 3, false)
+  );
+  try {
+    const result = parseSession(file);
+    assert.strictEqual(result.validMagic, false);
+    assert.strictEqual(result.truncated, false);
+  } finally {
+    fs.rmSync(path.dirname(file), { recursive: true, force: true });
+  }
+});
+
 check('render redacts credentials, query and fragment by default', () => {
   const groups = [
     {
@@ -299,6 +331,10 @@ check('redactUrl handles about:blank without corrupting it', () => {
 
 check('redactUrl keeps a file:// path intact', () => {
   assert.strictEqual(redactUrl('file:///tmp/report.html'), 'file:///tmp/report.html');
+});
+
+check('redactUrl keeps the host of a UNC file:// path', () => {
+  assert.strictEqual(redactUrl('file://server/share/report.html?x=1#f'), 'file://server/share/report.html');
 });
 
 check('redactUrl handles a chrome-extension: page', () => {
@@ -425,6 +461,47 @@ check('sessionFilesNewestFirst survives a file disappearing between listing and 
     fs.statSync = realStatSync;
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+check('profileDirs recognizes a profile that only has encrypted session storage', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'encrypted-only-'));
+  fs.mkdirSync(path.join(root, 'Default', ENCRYPTED_SESSIONS_DIR), { recursive: true });
+  try {
+    assert.deepStrictEqual(profileDirs(root), ['Default']);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+check('hasEncryptedSessionData is true only when a Session_* file is actually present', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'encrypted-check-'));
+  const dir = path.join(root, 'Default', ENCRYPTED_SESSIONS_DIR);
+  fs.mkdirSync(dir, { recursive: true });
+  try {
+    assert.strictEqual(hasEncryptedSessionData(root, 'Default'), false);
+    fs.writeFileSync(path.join(dir, 'Session_1'), 'opaque');
+    assert.strictEqual(hasEncryptedSessionData(root, 'Default'), true);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+check('render reports an encrypted-only profile distinctly from unreadable or empty', () => {
+  const text = render([{ profile: 'Default', session_file: null, status: 'encrypted', tabs: [] }]);
+  assert.ok(text.includes('encrypted session storage'), text);
+  assert.ok(!text.includes('could not be read'), text);
+  assert.ok(!text.includes('no profile has an open tab'), text);
+});
+
+check('render omits an encrypted profile from the tab count when other profiles have tabs', () => {
+  const groups = [
+    { profile: 'Default', session_file: 'Session_1', status: 'ok', tabs: [{ tab_id: 1, window_id: 1, url: 'https://example.com/', title: 'T' }] },
+    { profile: 'Profile 1', session_file: null, status: 'encrypted', tabs: [] },
+  ];
+  const text = render(groups);
+  assert.ok(text.includes('1 open tab(s) across 1 profile(s)'), text);
+  assert.ok(text.includes("encrypted session storage"), text);
+  assert.ok(text.includes('Profile 1'), text);
 });
 
 if (fails) {

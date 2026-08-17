@@ -26,6 +26,12 @@ const CMD_UPDATE_TAB_NAVIGATION = 6;
 const CMD_SET_SELECTED_NAVIGATION_INDEX = 7;
 const CMD_TAB_CLOSED = 16;
 const CMD_WINDOW_CLOSED = 17;
+// chromium/components/sessions/core/command_storage_backend.cc
+// kInitialStateMarkerCommandId. Written exactly once, when the initial
+// snapshot finishes being written. Its absence means Chromium itself would
+// not treat the file as a valid, complete snapshot; this parser follows the
+// same rule rather than trusting a byte-complete file that never earned it.
+const CMD_INITIAL_STATE_MARKER = 255;
 
 // chromium/components/sessions/core/session_backend.cc kFileCurrentVersion.
 // 3 is the current cleartext format, confirmed against a real session file
@@ -33,6 +39,15 @@ const CMD_WINDOW_CLOSED = 17;
 // regardless; any version this parser has not confirmed is treated the same
 // way, fail closed, rather than assumed compatible.
 const SNSS_CURRENT_VERSION = 3;
+
+// chromium/components/sessions/core/session_constants.cc. Chrome's staged
+// encryption rollout (added Chrome 148, crbug.com/479420496) can write a
+// profile's session data here instead of, or alongside, CLEARTEXT_SESSIONS_DIR.
+// This parser cannot decrypt that format; a profile using only this
+// directory is reported as such, not silently skipped as if it had no
+// session data at all.
+const CLEARTEXT_SESSIONS_DIR = 'Sessions';
+const ENCRYPTED_SESSIONS_DIR = 'Sessions_Encrypted';
 
 const utf8Decoder = new TextDecoder('utf-8', { fatal: true });
 const utf16Decoder = new TextDecoder('utf-16le', { fatal: true });
@@ -64,6 +79,10 @@ function userDataDirs(platform = process.platform, env = process.env, home = os.
     .filter(isDir);
 }
 
+// A profile counts as one this tool knows about if it has either session
+// directory: cleartext, encrypted, or both. Requiring only CLEARTEXT_SESSIONS_DIR
+// silently dropped a profile that has moved to encrypted-only storage,
+// rather than reporting it as unreadable.
 function profileDirs(userDataDir) {
   let names;
   try {
@@ -74,14 +93,26 @@ function profileDirs(userDataDir) {
   return names.filter(
     (name) =>
       (name === 'Default' || name.startsWith('Profile ')) &&
-      isDir(path.join(userDataDir, name, 'Sessions'))
+      (isDir(path.join(userDataDir, name, CLEARTEXT_SESSIONS_DIR)) ||
+        isDir(path.join(userDataDir, name, ENCRYPTED_SESSIONS_DIR)))
   );
+}
+
+function hasEncryptedSessionData(userDataDir, profile) {
+  const dir = path.join(userDataDir, profile, ENCRYPTED_SESSIONS_DIR);
+  let names;
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return false;
+  }
+  return names.some((n) => n.startsWith('Session_'));
 }
 
 // Newest first: a truncated or unrecognized newest file falls back to the
 // next one down rather than being reported as an empty browser.
 function sessionFilesNewestFirst(userDataDir, profile) {
-  const dir = path.join(userDataDir, profile, 'Sessions');
+  const dir = path.join(userDataDir, profile, CLEARTEXT_SESSIONS_DIR);
   let names;
   try {
     names = fs.readdirSync(dir);
@@ -112,13 +143,16 @@ function aligned(n) {
 }
 
 // SNSS is a magic + version header, then uint16-length-prefixed commands.
-// validMagic false means this is not a file this parser can read at all,
-// whether because the magic is wrong or the version is one it has not
-// confirmed. truncated true means it started as a version it understands
-// but a record's declared size ran past the end of the file, or the file
-// ended with leftover bytes too short to even hold a length prefix: either
-// way, a record was cut off mid-write. Records collected before that point
-// are still returned.
+// validMagic false means this is not a file this parser trusts, whether
+// because the magic is wrong, the version is one it has not confirmed, or a
+// byte-complete file never wrote CMD_INITIAL_STATE_MARKER, which Chromium
+// itself requires before treating a file as a valid, finished snapshot.
+// truncated true means it started as a version it understands but a
+// record's declared size ran past the end of the file, or the file ended
+// with leftover bytes too short to even hold a length prefix: either way, a
+// record was cut off mid-write. Records collected before that point are
+// still returned. The marker requirement only applies to a byte-complete
+// file: a truncated file is already known to be less than fully trusted.
 function readRecords(buf) {
   const records = [];
   if (buf.length < 8 || buf.toString('latin1', 0, 4) !== 'SNSS') {
@@ -137,7 +171,11 @@ function readRecords(buf) {
     records.push([buf[off], buf.subarray(off + 1, off + size)]);
     off += size;
   }
-  return { records, validMagic: true, truncated: off < buf.length };
+  const truncated = off < buf.length;
+  if (!truncated && !records.some(([cmd]) => cmd === CMD_INITIAL_STATE_MARKER)) {
+    return { records, validMagic: false, truncated: false };
+  }
+  return { records, validMagic: true, truncated };
 }
 
 // Pickle layout: size, tab id, nav index, then url (utf-8) and title (utf-16).
@@ -226,7 +264,21 @@ function collect(profileFilter) {
     for (const profile of profileDirs(udd)) {
       if (profileFilter && profile !== profileFilter) continue;
       const files = sessionFilesNewestFirst(udd, profile);
-      if (!files.length) continue;
+      const encrypted = hasEncryptedSessionData(udd, profile);
+
+      if (!files.length) {
+        // No cleartext session file at all. If this profile has moved to
+        // Chrome's encrypted session storage, say so explicitly: it is a
+        // permanent, by-design gap, not the same as "nothing here."
+        results.push({
+          user_data_dir: udd,
+          profile,
+          session_file: null,
+          tabs: [],
+          status: encrypted ? 'encrypted' : 'unreadable',
+        });
+        continue;
+      }
 
       let chosen = null;
       let chosenFile = null;
@@ -245,7 +297,13 @@ function collect(profileFilter) {
       }
 
       if (!chosen) {
-        results.push({ user_data_dir: udd, profile, session_file: null, tabs: [], status: 'unreadable' });
+        results.push({
+          user_data_dir: udd,
+          profile,
+          session_file: null,
+          tabs: [],
+          status: encrypted ? 'encrypted' : 'unreadable',
+        });
         continue;
       }
       results.push({
@@ -291,7 +349,9 @@ function redactUrl(url) {
     return `data:${u.pathname.split(',')[0]},[redacted]`;
   }
   if (u.protocol === 'file:') {
-    return `file://${u.pathname}`;
+    // u.host is empty for an ordinary local path and the machine name for a
+    // UNC path (file://server/share/...); keep it either way.
+    return `file://${u.host}${u.pathname}`;
   }
   if (u.protocol === 'about:') {
     return `about:${u.pathname}`;
@@ -308,11 +368,12 @@ function render(groups, { includeUrls = true, fullUrls = false } = {}) {
   }
 
   const unreadable = groups.filter((g) => g.status === 'unreadable');
+  const encrypted = groups.filter((g) => g.status === 'encrypted');
   const withTabs = groups.filter((g) => g.tabs.length);
 
   if (!withTabs.length) {
     const lines = [];
-    if (unreadable.length < groups.length) {
+    if (unreadable.length + encrypted.length < groups.length) {
       lines.push('Chrome session files were found, but no profile has an open tab.');
     }
     if (unreadable.length) {
@@ -320,6 +381,12 @@ function render(groups, { includeUrls = true, fullUrls = false } = {}) {
         `${unreadable.length} profile(s) could not be read (${unreadable.map((g) => g.profile).join(', ')}): ` +
           'every session file for them was unrecognized or too damaged to parse. This can mean a Chrome ' +
           'version this parser has not seen, or a file caught mid-write; it is not the same as having no tabs.'
+      );
+    }
+    if (encrypted.length) {
+      lines.push(
+        `${encrypted.length} profile(s) use Chrome's encrypted session storage (${encrypted.map((g) => g.profile).join(', ')}), ` +
+          'which this tool cannot decrypt. This is a permanent limitation for those profiles, not a corrupt or missing file.'
       );
     }
     return lines.join('\n');
@@ -333,6 +400,14 @@ function render(groups, { includeUrls = true, fullUrls = false } = {}) {
     out.push(
       `${unreadable.length} other profile(s) could not be read and are omitted: ` +
         unreadable.map((g) => g.profile).join(', ') +
+        '.'
+    );
+  }
+  if (encrypted.length) {
+    out.push(
+      `${encrypted.length} other profile(s) use Chrome's encrypted session storage and are omitted, ` +
+        "not readable by this tool: " +
+        encrypted.map((g) => g.profile).join(', ') +
         '.'
     );
   }
@@ -469,6 +544,11 @@ module.exports = {
   aligned,
   userDataDirs,
   sessionFilesNewestFirst,
+  profileDirs,
+  hasEncryptedSessionData,
   SERVER_VERSION,
   SNSS_CURRENT_VERSION,
+  CMD_INITIAL_STATE_MARKER,
+  CLEARTEXT_SESSIONS_DIR,
+  ENCRYPTED_SESSIONS_DIR,
 };
