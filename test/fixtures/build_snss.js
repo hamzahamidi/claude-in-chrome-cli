@@ -9,6 +9,7 @@
 
 const CMD_SET_TAB_WINDOW = 0;
 const CMD_UPDATE_TAB_NAVIGATION = 6;
+const CMD_SET_SELECTED_NAVIGATION_INDEX = 7;
 const CMD_TAB_CLOSED = 16;
 const CMD_WINDOW_CLOSED = 17;
 
@@ -59,6 +60,16 @@ function updateTabNavigation(tabId, navIndex, url, title) {
   return encodeRecord(CMD_UPDATE_TAB_NAVIGATION, payload);
 }
 
+// chromium's IDAndIndexPayload: tab id, then the navigation index the tab
+// is now showing. Written on back/forward and on session restore; it is
+// what a tab that has visited more than one url is actually displaying.
+function setSelectedNavigationIndex(tabId, index) {
+  const p = Buffer.alloc(8);
+  p.writeInt32LE(tabId, 0);
+  p.writeInt32LE(index, 4);
+  return encodeRecord(CMD_SET_SELECTED_NAVIGATION_INDEX, p);
+}
+
 // A raw record for edge cases the helpers above cannot express, e.g. a
 // truncated or otherwise malformed payload that the parser must ignore
 // rather than throw on.
@@ -76,6 +87,7 @@ module.exports = {
   tabClosed,
   windowClosed,
   updateTabNavigation,
+  setSelectedNavigationIndex,
   rawRecord,
   buildSession,
   aligned,

@@ -4,7 +4,9 @@
 
 Adds `list_open_tabs`, a second MCP server, `chrome-tabs`, that reads Chrome's session file from disk. The extension bridge only ever sees tabs inside its own tab group; this answers "what is open" without a debugging port, an extension or a group, across every window and every profile on the machine.
 
-Ships in Node rather than the Python it was originally written in (see #4), so the plugin's second MCP server needs no interpreter beyond what `claude` already requires on the platforms that matter. URLs are redacted to origin and path by default, since a raw URL read straight off disk can carry a token or a session id that the extension bridge's own redaction would have caught; pass `full_urls: true` to opt into the raw URL.
+Ships in Node rather than the Python it was originally written in (see #4), so the plugin's second MCP server needs no interpreter beyond what `claude` already requires on the platforms that matter. URLs are redacted to origin and path by default and scheme-aware, so `chrome:`, `file:`, `chrome-extension:` and `data:` pages redact correctly rather than corrupting into a literal `null` prefix; pass `full_urls: true` to opt into the raw URL.
+
+Fixes a tab that has visited more than one URL reporting whichever was written to disk last rather than the one actually selected: Chrome records history entries and the currently selected one as separate commands, and only the second was read. Confirmed against a real profile before the fix: 2 of 31 multi-entry tabs in one session were misreported. A session file that is truncated or in a format this parser does not recognize is now reported as unreadable rather than silently folded into "no open tabs"; discovery falls back to the next-newest session file when the newest one is unreadable. Windows profile discovery now checks Chromium alongside Chrome, matching macOS and Linux. The skill no longer claims `list_open_tabs` can say which tab currently has focus; it reports which page each tab is on, not which one the user is looking at.
 
 Adds a GitHub Actions workflow running the test suite on every push, and a check that `tabs_mcp.js`'s version constant matches `plugin.json`.
 

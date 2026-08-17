@@ -1,6 +1,6 @@
 ---
 name: using-claude-in-chrome
-description: Use before controlling Chrome for anything that needs the user's real login session (a tool behind SSO, a Slack UI action, any cookie-gated page) and whenever another browser tool lands on a login page, returns an empty or anonymous-looking page, or seems to have lost a session that worked a moment ago. Also use when scripting browser control from a shell, a cron job, or an agent that cannot hold an MCP connection. Also use when asked what is currently open in Chrome (how many tabs, is a page open anywhere, which one was being looked at), which `list_open_tabs` answers from the profile on disk without driving a browser.
+description: Use before controlling Chrome for anything that needs the user's real login session (a tool behind SSO, a Slack UI action, any cookie-gated page) and whenever another browser tool lands on a login page, returns an empty or anonymous-looking page, or seems to have lost a session that worked a moment ago. Also use when scripting browser control from a shell, a cron job, or an agent that cannot hold an MCP connection. Also use when asked what is currently open in Chrome (how many tabs, is a page open anywhere, what url a tab is on), which `list_open_tabs` answers from the profile on disk without driving a browser.
 ---
 
 # Using Claude in Chrome
@@ -11,7 +11,7 @@ Then do not drive a browser at all. Call **`list_open_tabs`**, from the `chrome-
 
 Pass `include_urls: false` for counts and hosts only, or `profile` to narrow to one Chrome profile.
 
-It returns URLs and titles, not page content, and it cannot drive a page. For either of those, read on.
+It returns URLs and titles, not page content, and it cannot drive a page. It also does not track which tab or window currently has focus, only which page each tab is showing: do not use it to answer "which tab is the user looking at right now". For either page content or drive, read on.
 
 ## Overview
 

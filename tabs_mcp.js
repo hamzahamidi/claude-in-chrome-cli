@@ -23,6 +23,7 @@ const PROTOCOL_VERSION = '2024-11-05';
 // chromium/components/sessions/core/session_service_commands.cc
 const CMD_SET_TAB_WINDOW = 0;
 const CMD_UPDATE_TAB_NAVIGATION = 6;
+const CMD_SET_SELECTED_NAVIGATION_INDEX = 7;
 const CMD_TAB_CLOSED = 16;
 const CMD_WINDOW_CLOSED = 17;
 
@@ -37,17 +38,19 @@ function isDir(p) {
   }
 }
 
-function userDataDirs() {
-  const home = os.homedir();
-  if (process.platform === 'darwin') {
+// platform/env/home are injectable so path discovery can be tested for every
+// OS from one machine, not only the one the tests happen to run on.
+function userDataDirs(platform = process.platform, env = process.env, home = os.homedir()) {
+  if (platform === 'darwin') {
     return ['Library/Application Support/Google/Chrome', 'Library/Application Support/Chromium']
       .map((r) => path.join(home, r))
       .filter(isDir);
   }
-  if (process.platform === 'win32') {
-    const local = process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local');
-    const p = path.join(local, 'Google', 'Chrome', 'User Data');
-    return isDir(p) ? [p] : [];
+  if (platform === 'win32') {
+    const local = env.LOCALAPPDATA || path.join(home, 'AppData', 'Local');
+    return [path.join('Google', 'Chrome', 'User Data'), path.join('Chromium', 'User Data')]
+      .map((r) => path.join(local, r))
+      .filter(isDir);
   }
   return ['.config/google-chrome', '.config/chromium']
     .map((r) => path.join(home, r))
@@ -68,41 +71,54 @@ function profileDirs(userDataDir) {
   );
 }
 
-function newestSessionFile(userDataDir, profile) {
+// Newest first: a truncated or unrecognized newest file falls back to the
+// next one down rather than being reported as an empty browser.
+function sessionFilesNewestFirst(userDataDir, profile) {
   const dir = path.join(userDataDir, profile, 'Sessions');
   let names;
   try {
     names = fs.readdirSync(dir);
   } catch {
-    return null;
+    return [];
   }
   const files = names.filter((n) => n.startsWith('Session_')).map((n) => path.join(dir, n));
-  if (!files.length) return null;
-  return files.reduce((newest, f) =>
-    fs.statSync(f).mtimeMs > fs.statSync(newest).mtimeMs ? f : newest
-  );
-}
-
-// SNSS is a magic + version header, then uint16-length-prefixed commands.
-function* records(buf) {
-  if (buf.length < 4 || buf.toString('latin1', 0, 4) !== 'SNSS') return;
-  let off = 8;
-  while (off + 2 <= buf.length) {
-    const size = buf.readUInt16LE(off);
-    off += 2;
-    if (size === 0 || off + size > buf.length) return;
-    yield [buf[off], buf.subarray(off + 1, off + size)];
-    off += size;
-  }
+  return files.sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
 }
 
 function aligned(n) {
   return n + ((4 - (n % 4)) % 4);
 }
 
+// SNSS is a magic + version header, then uint16-length-prefixed commands.
+// validMagic false means this is not a session file this parser recognizes
+// at all. truncated true means it started as one but a record's declared
+// size ran past the end of the file, e.g. Chrome was killed mid-write: the
+// records collected up to that point are still returned.
+function readRecords(buf) {
+  const records = [];
+  if (buf.length < 8 || buf.toString('latin1', 0, 4) !== 'SNSS') {
+    return { records, validMagic: false, truncated: false };
+  }
+  let off = 8;
+  while (off + 2 <= buf.length) {
+    const size = buf.readUInt16LE(off);
+    off += 2;
+    if (size === 0 || off + size > buf.length) {
+      return { records, validMagic: true, truncated: true };
+    }
+    records.push([buf[off], buf.subarray(off + 1, off + size)]);
+    off += size;
+  }
+  return { records, validMagic: true, truncated: false };
+}
+
 // Pickle layout: size, tab id, nav index, then url (utf-8) and title (utf-16).
+// The nav index matters: a tab that went A -> B -> back to A has two entries,
+// and CMD_SET_SELECTED_NAVIGATION_INDEX (not this record) says which one the
+// tab is actually showing.
 function navigation(payload) {
   const tab = payload.readInt32LE(4);
+  const index = payload.readInt32LE(8);
   const urlLen = payload.readInt32LE(12);
   if (!(urlLen > 0 && urlLen < 8192) || 16 + urlLen > payload.length) return null;
   let url;
@@ -124,55 +140,93 @@ function navigation(payload) {
       }
     }
   }
-  return { tab, url, title };
+  return { tab, index, url, title };
 }
 
+// Returns { tabs, validMagic, truncated }. tabs is whatever could be
+// recovered even when truncated is true: a partial answer beats none.
 function parseSession(filePath) {
   const blob = fs.readFileSync(filePath);
+  const { records, validMagic, truncated } = readRecords(blob);
+
   const tabToWindow = new Map();
   const closedTabs = new Set();
   const closedWindows = new Set();
-  const nav = new Map();
+  const navByTab = new Map(); // tab -> Map(index -> {url, title})
+  const selectedIndex = new Map(); // tab -> currently selected nav index
 
-  for (const [cmd, payload] of records(blob)) {
+  for (const [cmd, payload] of records) {
     if (cmd === CMD_SET_TAB_WINDOW && payload.length >= 8) {
       tabToWindow.set(payload.readInt32LE(4), payload.readInt32LE(0));
     } else if (cmd === CMD_TAB_CLOSED && payload.length >= 4) {
       closedTabs.add(payload.readInt32LE(0));
     } else if (cmd === CMD_WINDOW_CLOSED && payload.length >= 4) {
       closedWindows.add(payload.readInt32LE(0));
+    } else if (cmd === CMD_SET_SELECTED_NAVIGATION_INDEX && payload.length >= 8) {
+      selectedIndex.set(payload.readInt32LE(0), payload.readInt32LE(4));
     } else if (cmd === CMD_UPDATE_TAB_NAVIGATION && payload.length >= 16) {
       const entry = navigation(payload);
-      if (entry) nav.set(entry.tab, { url: entry.url, title: entry.title });
+      if (entry) {
+        if (!navByTab.has(entry.tab)) navByTab.set(entry.tab, new Map());
+        navByTab.get(entry.tab).set(entry.index, { url: entry.url, title: entry.title });
+      }
     }
   }
 
   const tabs = [];
-  const entries = [...tabToWindow.entries()].sort(
-    (a, b) => a[1] - b[1] || a[0] - b[0]
-  );
+  const entries = [...tabToWindow.entries()].sort((a, b) => a[1] - b[1] || a[0] - b[0]);
   for (const [tab, window] of entries) {
     if (closedTabs.has(tab) || closedWindows.has(window)) continue;
-    const n = nav.get(tab) || { url: '', title: '' };
-    tabs.push({ tab_id: tab, window_id: window, url: n.url, title: n.title });
+    const byIndex = navByTab.get(tab);
+    let entry = { url: '', title: '' };
+    if (byIndex && byIndex.size) {
+      const wanted = selectedIndex.get(tab);
+      const index = byIndex.has(wanted) ? wanted : Math.max(...byIndex.keys());
+      entry = byIndex.get(index);
+    }
+    tabs.push({ tab_id: tab, window_id: window, url: entry.url, title: entry.title });
   }
-  return tabs;
+  return { tabs, validMagic, truncated };
 }
 
+// Tries session files newest first. A file this parser does not recognize,
+// or a truncated one that recovered nothing, is skipped in favor of an
+// older one rather than reported as "no tabs".
 function collect(profileFilter) {
   const results = [];
   for (const udd of userDataDirs()) {
     for (const profile of profileDirs(udd)) {
       if (profileFilter && profile !== profileFilter) continue;
-      const file = newestSessionFile(udd, profile);
-      if (!file) continue;
-      let tabs;
-      try {
-        tabs = parseSession(file);
-      } catch {
+      const files = sessionFilesNewestFirst(udd, profile);
+      if (!files.length) continue;
+
+      let chosen = null;
+      let chosenFile = null;
+      for (const file of files) {
+        let result;
+        try {
+          result = parseSession(file);
+        } catch {
+          continue;
+        }
+        if (!result.validMagic) continue;
+        if (result.truncated && result.tabs.length === 0) continue;
+        chosen = result;
+        chosenFile = file;
+        break;
+      }
+
+      if (!chosen) {
+        results.push({ user_data_dir: udd, profile, session_file: null, tabs: [], status: 'unreadable' });
         continue;
       }
-      results.push({ user_data_dir: udd, profile, session_file: path.basename(file), tabs });
+      results.push({
+        user_data_dir: udd,
+        profile,
+        session_file: path.basename(chosenFile),
+        tabs: chosen.tabs,
+        status: chosen.truncated ? 'incomplete' : 'ok',
+      });
     }
   }
   return results;
@@ -186,35 +240,73 @@ function hostnameOf(url) {
   }
 }
 
-// Origin and path only: no credentials, query string or fragment. A raw URL
-// can carry a token or session id that the bridge's own redaction would have
-// caught, and this server has no equivalent redaction over page content.
+// Scheme-aware. Credentials, query strings and fragments are always
+// stripped, since a raw URL can carry a token or session id that the
+// extension bridge's own redaction would have caught. Beyond that:
+// data: URIs keep only their media type, since the payload after the comma
+// is arbitrary embedded content rather than a page address; every other
+// scheme keeps its host (when it has one) and path, which covers chrome:,
+// chrome-extension: and file: as well as http(s).
 function redactUrl(url) {
+  let u;
   try {
-    const u = new URL(url);
-    return u.origin + u.pathname;
+    u = new URL(url);
   } catch {
     return '(unparseable)';
   }
+  if (u.protocol === 'data:') {
+    return `data:${u.pathname.split(',')[0]},[redacted]`;
+  }
+  if (u.protocol === 'file:') {
+    return `file://${u.pathname}`;
+  }
+  if (u.host) {
+    return `${u.protocol}//${u.host}${u.pathname}`;
+  }
+  return `${u.protocol}${u.pathname}`;
 }
 
 function render(groups, { includeUrls = true, fullUrls = false } = {}) {
   if (!groups.length) {
     return 'No Chrome session file found. Looked for <user data dir>/<profile>/Sessions/Session_*.';
   }
+
+  const unreadable = groups.filter((g) => g.status === 'unreadable');
   const withTabs = groups.filter((g) => g.tabs.length);
+
   if (!withTabs.length) {
-    return 'Chrome session files were found, but no profile has an open tab.';
+    const lines = [];
+    if (unreadable.length < groups.length) {
+      lines.push('Chrome session files were found, but no profile has an open tab.');
+    }
+    if (unreadable.length) {
+      lines.push(
+        `${unreadable.length} profile(s) could not be read (${unreadable.map((g) => g.profile).join(', ')}): ` +
+          'every session file for them was unrecognized or too damaged to parse. This can mean a Chrome ' +
+          'version this parser has not seen, or a file caught mid-write; it is not the same as having no tabs.'
+      );
+    }
+    return lines.join('\n');
   }
 
   const out = [];
   const total = withTabs.reduce((n, g) => n + g.tabs.length, 0);
   out.push(`${total} open tab(s) across ${withTabs.length} profile(s), read from disk.`);
   out.push('This is a snapshot Chrome writes periodically, so it can lag by a little.');
+  if (unreadable.length) {
+    out.push(
+      `${unreadable.length} other profile(s) could not be read and are omitted: ` +
+        unreadable.map((g) => g.profile).join(', ') +
+        '.'
+    );
+  }
   for (const g of withTabs) {
     const windows = new Set(g.tabs.map((t) => t.window_id));
     out.push('');
     out.push(`## profile ${g.profile} (${g.tabs.length} tabs, ${windows.size} window(s), ${g.session_file})`);
+    if (g.status === 'incomplete') {
+      out.push('note: this profile\'s session file was truncated or partly unreadable; the list below may be incomplete.');
+    }
     const hosts = new Map();
     for (const t of g.tabs) {
       const host = hostnameOf(t.url);
@@ -243,11 +335,13 @@ const TOOLS = [
       'this machine, by reading the browser session file from disk. Needs no ' +
       'remote debugging port, no extension and no tab group, so it sees tabs the ' +
       "Claude in Chrome bridge cannot, and it is not limited to one profile. Use " +
-      'it for any read-only question about what is open. It cannot drive a page. ' +
-      'URLs are redacted by default to origin and path only, with credentials, ' +
-      'query strings and fragments stripped, since a raw URL can carry a token ' +
-      "or session id that the bridge's own redaction would have caught. Pass " +
-      'full_urls to get the raw URL instead.',
+      'it for any read-only question about what is open. It cannot drive a page, ' +
+      'and it does not track which tab or window currently has focus, only which ' +
+      'page each tab is on. URLs are redacted by default to origin and path only, ' +
+      'with credentials, query strings and fragments stripped, since a raw URL ' +
+      "can carry a token or session id that the bridge's own redaction would " +
+      'have caught. Pass full_urls to get the raw URL instead. A profile whose ' +
+      'session file is unreadable is reported as such, not silently as empty.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -326,4 +420,13 @@ if (require.main === module) {
   main();
 }
 
-module.exports = { collect, parseSession, render, redactUrl, aligned, SERVER_VERSION };
+module.exports = {
+  collect,
+  parseSession,
+  readRecords,
+  render,
+  redactUrl,
+  aligned,
+  userDataDirs,
+  SERVER_VERSION,
+};
