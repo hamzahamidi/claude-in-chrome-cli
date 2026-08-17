@@ -32,7 +32,7 @@ The plugin is a second front door. Install it to make `navigate`, `read_page`, `
 /plugin install claude-in-chrome@claude-in-chrome-cli
 ```
 
-New Claude Code sessions get all the extension tools natively, plus a skill ([`using-claude-in-chrome`](skills/using-claude-in-chrome/SKILL.md)) that teaches the agent when to prefer your real session over sessionless browser tools, and how to avoid the common traps.
+New Claude Code sessions get all the extension tools natively, plus a skill ([`using-claude-in-chrome`](skills/using-claude-in-chrome/SKILL.md)) that teaches the agent when your real session is the one that matters, which browser tool to reach for when it is not, and how to avoid the common traps.
 
 ### As a shell script
 
@@ -111,6 +111,12 @@ Each call is its own stdio session, so nothing persists in the CLI between calls
 - It drives your real, logged-in browser. Treat it like handing a script your keyboard.
 - No streaming: you get the result after `wait_secs`. Raise it for slow actions.
 - One tool per invocation. For sequences, run several calls or use `browser_batch`.
+- **The tab group is the boundary.** `tabs_context_mcp` lists the tabs in the extension's group and nothing else. No tool pulls another one in: there is no move, no "all windows" flag, and `select_browser` picks a browser rather than a tab. Which window a tab sits in makes no difference. To act on a page you already have open, re-open its URL in a group tab, or add your tab to the group from Chrome's own tab context menu.
+- **No DevTools protocol.** Navigation, reading and interaction only, so no performance traces, and `navigate` cannot load a `chrome://` URL (it prefixes the scheme).
+
+For CDP work, reach for [`chrome-devtools-mcp`](https://github.com/ChromeDevTools/chrome-devtools-mcp) as it comes. It launches its own Chrome on a profile it keeps between runs (`~/.cache/chrome-devtools-mcp/chrome-profile`), so signing in there once gives you a real session on every later run, with no port open and nothing to enable. Two such servers cannot launch at once: the second answers `The browser is already running for …/chrome-profile`, and `--isolated` is the way out, at the cost of that profile's cookies.
+
+One thing alone needs remote debugging, and that is the tabs you already have open in your daily Chrome. Enable it at `chrome://inspect/#remote-debugging` (Chrome 144 and later) and attach with `--autoConnect`. Not `--browser-url`, whose discovery endpoints answer 404 in that mode, and not `--wsEndpoint`, whose path is regenerated on every Chrome restart. It attaches to your default profile, so any local process reaching the port drives a fully authenticated browser, and the setting persists until you turn it off.
 
 ## License
 
