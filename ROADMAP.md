@@ -9,7 +9,7 @@ Each release is small and shippable on its own. The non-goals are part of the pl
 Three rules hold across every release below.
 
 1. **`cic call` never owns a schema.** Pure pass-through is why the CLI cannot break when the extension changes its tools. Friendly verbs (0.5.0) each own one positional argument mapping at most; `cic call` remains the schema-agnostic escape hatch forever.
-2. **The exit-code contract is defined at 0.4.0 and frozen from then on:** 0 success, 1 tool error (a JSON-RPC error or `isError: true`), 2 no reply within the timeout, 64 usage error or invalid arguments JSON. Known defect until then: `cic.sh` exits 0 on tool errors, so a pipeline proceeds after a failure. That is fixed by the Node CLI, not patched in shell.
+2. **The exit-code contract is defined at 0.4.0 and frozen from then on:** 0 success, 1 tool error (a JSON-RPC error or `isError: true`), 2 no reply within the timeout (the request was sent, so the outcome is unknown), 3 transport or process failure before a reply was possible (`claude` missing or failing to spawn, the child exiting early, a malformed reply, an unsupported protocol version, local I/O errors), 64 usage error or invalid arguments JSON. With `--json`, every failure emits a one-line error object on stdout, so a machine caller never has to parse an empty stream. Known defect until then: `cic.sh` exits 0 on tool errors, so a pipeline proceeds after a failure. That is fixed by the Node CLI, not patched in shell.
 3. **`plugin.json` is the single source of truth for the version.** CI asserts every other version constant matches it.
 
 ## v0.2.3: docs tell the truth (shipped 2026-08-17)
@@ -24,6 +24,7 @@ Theme: the tab-visibility gap closes, shipping once, in the target runtime.
 - The existing 9-assertion handshake test ported along with it, including the unknown-tool error path.
 - Infrastructure starts here: GitHub Actions running the tests on every push, a CHANGELOG backfilled to 0.1.0, and a CI check that the server's version constant equals `plugin.json`.
 - README documents the `node` requirement for this one server. If `node` is absent, only `chrome-tabs` degrades; the main bridge is untouched.
+- The privacy boundary is wider than the bridge's and the release says so. The parser reads every recognized profile (`Default` and `Profile *`, Chrome and Chromium alike), and a raw URL can carry tokens, credentials or sensitive query parameters that the bridge's own redaction would have caught. Default output is therefore titles plus origin and path only: credentials, query strings and fragments are stripped. Full URLs require an explicit opt-in argument, and the all-profile scope is documented in the tool description itself, where the calling agent sees it.
 
 Non-goals: no `cic.sh` changes, no write operations on tabs.
 
@@ -33,15 +34,17 @@ Risk: SNSS is an undocumented Chromium internal and can shift across Chrome vers
 
 Theme: one implementation, and it stops lying to pipelines.
 
-- An npm package (bin: `cic`), Node 18 or later, zero runtime dependencies. Commands: `cic list` and `cic call <tool> [json-args]`, pure pass-through preserved.
-- `cic.sh` is deleted in this same release. No coexistence period, no wrapper. The curl install path becomes `npm install -g`; a migration section maps every documented `cic.sh` invocation to its `cic` equivalent, and the skill points at the Node bin. The old script stays fetchable from the v0.2.x tags.
+- An npm package (bin: `cic`), Node 22 or later (18 and 20 are already past end of life), zero runtime dependencies. Commands: `cic list` and `cic call <tool> [json-args]`, pure pass-through preserved.
+- `cic.sh` is deleted in this same release. No coexistence period, no wrapper. The curl install path becomes `npm install -g`; a migration section maps every documented `cic.sh` invocation to its `cic` equivalent. The old script stays fetchable from the v0.2.x tags.
+- The plugin keeps its own shell entry point: the Node CLI ships bundled inside the plugin and the skill invokes it as `node ${CLAUDE_PLUGIN_ROOT}/...`, with the global npm install as the standalone path. Both installation paths are tested; deleting `cic.sh` must not silently leave the plugin without one.
+- The MCP lifecycle is fixed, not ported. `cic.sh` writes `initialize`, the `initialized` notification and the tool request in one burst without waiting for the initialize response; the spec says requests wait until initialization completes. The Node client negotiates in order, and the tests drive it against a scripted stub server that enforces ordering: acceptance cases for ordered negotiation, protocol-version rejection, timeout termination and child-process reaping, not just canned reply lines.
 - Everything the shell version got wrong, fixed once, here:
   - The exit-code contract, implemented and frozen.
   - stderr passthrough: a missing binary, a disconnected extension and an auth failure stop collapsing into one "no reply" message.
   - Arguments JSON validated client-side before send; garbage gets exit 64 instead of a silent drop (the 0.2.1 bug class).
   - Adaptive wait: read the child's stdout line by line and return the moment the reply lands. `--timeout <secs>` becomes a ceiling, not a floor. The 35 to 40 second worst-case advice drops to actual reply latency. This is structurally impossible in `cic.sh`, where a writer-side `sleep` holds the pipe open for the full wait on every call.
   - `--json`: the raw result object on one line. The machine-readable contract, defined once, in the implementation that keeps it.
-- An offline test corpus: canned JSON-RPC lines in, assert output and exit codes, no Chrome needed.
+- An offline test corpus: a scripted stub server plus canned JSON-RPC replies, asserting output, ordering and exit codes, no Chrome needed.
 
 Non-goals: no friendly verbs, no retries, no persistence. This is the biggest release for a solo maintainer; parity, correctness, adaptive wait and `--json` only.
 
@@ -51,10 +54,10 @@ Risk: deleting `cic.sh` breaks anyone who curled it. Accepted, versioned, and do
 
 Theme: the platform claim becomes real, and the common path stops requiring hand-written JSON.
 
-- CI matrix: ubuntu, macos, windows. All tests are offline, so CI cannot flake on Chrome. Windows support formally claimed in the README, with the Windows and Linux profile paths verified against fixtures.
+- CI matrix: ubuntu, macos, windows, on Node 22 and 24. All tests are offline, so CI cannot flake on Chrome. Windows support formally claimed in the README, with the Windows and Linux profile paths verified against fixtures.
 - Friendly verbs for roughly six tools: `cic navigate <url>`, `cic text [tabId]`, `cic screenshot [-o out.png]` (finally an exit route for image content, which `cic.sh` discarded as `[image]`), `cic find "<query>"`, `cic js "<code>"`, and `cic tabs` (reads the session-file parser directly; a local file read needs no MCP round trip).
 - This is where the CLI starts owning schemas, and the line is drawn explicitly: each verb maps its positionals to the single most-stable argument key, does no client-side schema validation, passes extras through `--arg key=value`, and surfaces server errors verbatim. The cost is accepted and documented: an extension-side rename breaks a verb until patched. `cic call` never breaks.
-- `--retries N` with backoff, only on exit-2 conditions (no reply, timeout), never on tool errors.
+- `--retries N` with backoff, only on failures that happen before the request is dispatched (spawn failures, handshake failures: the exit-3 class). A timeout after dispatch is never retried automatically, because the action may already have run in the browser; retrying a click, a submit or a `javascript_tool` call repeats it. Exit 2 keeps meaning "outcome unknown" and the caller decides.
 
 Verbs ship two releases before 1.0 deliberately, so names can still change on real usage feedback.
 
@@ -64,6 +67,7 @@ Theme: one live MCP connection.
 
 - `cic serve`, a daemon (or auto-spawned on `--session`) holding one `claude --claude-in-chrome-mcp` child: unix socket (named pipe on Windows), request-id allocation, reply demultiplexing, idle-timeout shutdown, `cic session stop`.
 - One-shot stays the default and `--session` is opt-in, so a daemon bug never breaks the default path. Per-call cost drops from process spawn plus handshake to a socket round trip, and the tab group survives between calls, which removes the empty-tab-group-per-invocation defect entirely.
+- The transport carries a security and compatibility contract, because whoever reaches the socket drives a logged-in browser: the socket lives in a directory owned by the current user with 0700 permissions (a DACL restricted to the current user for the Windows named pipe), the CLI and daemon exchange a version handshake on connect so a stale daemon left over from before an npm upgrade is detected and replaced rather than trusted, and auto-spawn takes an atomic lock so two racing invocations cannot start two daemons.
 
 This release ships nothing else. It is the hardest engineering in the roadmap: lifecycle, stale sockets, crash recovery, and two IPC implementations.
 
@@ -71,7 +75,8 @@ This release ships nothing else. It is the hardest engineering in the roadmap: l
 
 Theme: first persistent state.
 
-- `cic tab name <name>`, and `--tab <name>` accepted everywhere a tabId is. The store lives in the daemon, with an on-disk fallback (`~/.cache/cic/state.json`) for one-shot mode.
+- `cic tab name <name> <tabId>` records a mapping (the id is explicit; there is no "current tab" to infer), and `--tab <name>` is accepted by the friendly verbs. It is deliberately not accepted by `cic call`: injecting a tabId into caller-supplied arguments would mean owning the schema, which the first invariant forbids. Raw calls compose instead through `cic tab resolve <name>`, which prints the id.
+- One store for both modes: a single atomic on-disk file (`~/.cache/cic/state.json`). The daemon reads and writes the same file rather than holding names in memory, so an idle-timeout shutdown loses nothing.
 - The staleness rule: a name-to-id mapping is validated against the live tab list on every read, because tab ids die with a Chrome restart. A dead mapping produces a specific error and is pruned, never silently reused.
 
 ## v0.8.x: stabilization
