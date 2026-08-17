@@ -17,6 +17,8 @@ Normally you reach those tools from inside a Claude session. Sometimes you just 
 
 The plugin is a second front door. Install it to make `navigate`, `read_page`, `find`, `computer`, `get_page_text`, and the rest of the extension tools available natively in new Claude Code sessions.
 
+Where this is going, release by release: see the [roadmap](ROADMAP.md).
+
 ## Requirements
 
 - The **Claude Code CLI** (`claude`) on your PATH.
