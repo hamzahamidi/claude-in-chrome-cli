@@ -55,7 +55,9 @@ One job needs this and nothing else does: **reaching the tabs the user already h
 
 For a page the user already has open, in order: re-open the URL in a group tab, which is free and needs no setup; attach, if re-opening loses state that matters or you need several of their tabs; ask them to add the tab to the group from Chrome's own tab context menu only as a last resort. The group is a native Chrome tab group, so that menu acts on it. Do not ask them to drag a tab between windows.
 
-Setup is once: the user enables remote debugging at `chrome://inspect/#remote-debugging` (Chrome 144 and later), then `chrome-devtools` connects with `--autoConnect`. Prefer that flag over the alternatives: the HTTP discovery endpoints answer 404 in this mode, so `--browser-url` fails, and the WebSocket path in `DevToolsActivePort` is regenerated on every Chrome restart, so `--wsEndpoint` goes stale. `--autoConnect` reads that file itself.
+Setup is once: the user enables remote debugging at `chrome://inspect/#remote-debugging` (Chrome 144 and later), then `chrome-devtools` connects with `--autoConnect`. Prefer that flag over the alternatives: the HTTP discovery endpoints answer 404 in this mode, so `--browser-url` fails, and pinning `--wsEndpoint` to the path in `DevToolsActivePort` ties you to one browser session. `--autoConnect` reads that file itself.
+
+Do not treat that file as proof the setting is on. It outlives it: it has been seen still naming port 9222 with nothing listening. Check for a listener on the port instead.
 
 Tell the user the trade before suggesting it. The port listens on loopback only, so the exposure is local processes rather than the network, but any of them can then drive a fully authenticated browser, and the toggle stays on until the user turns it off.
 
