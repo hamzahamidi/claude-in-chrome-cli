@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.4.1 (unreleased)
+## 0.4.1 (2026-08-18)
 
 Closes the validation gaps 0.4.0 shipped with, listed there as known limits. Coverage was measured first, so these fixes have a number behind them rather than a claim: 94.95% of statements and 82.55% of branches before, 95.31% and 84.71% after, with the floor set from the earlier baseline so the new code had to be covered rather than merely added.
 
@@ -9,6 +9,12 @@ The initialize response now gets the same validator as a tool reply: exactly one
 Member validation replaces container validation. An outer array being present said nothing about what was in it, so a `content` entry could be a bare string, a text part could carry no `text`, and a tool could have no `name`. Error codes are checked as integers rather than any number, since 1.5 is not a JSON-RPC code, and `isError` as a boolean rather than anything truthy, since it decides the exit code and `"yes"` should not quietly mean failure.
 
 Worth being exact about one of the reported symptoms: plain and `--json` did not actually disagree on exit codes for any of these replies. What differed was their output, and what was wrong was that both agreed on success. A malformed text part printed an empty line in plain mode and the raw object under `--json`, and both exited 0. Both now exit 2. The suite gained a table that runs every hostile mode through both modes and asserts the exit codes match, plus one asserting every non-zero `--json` exit carries a well-formed envelope, so the agreement is now enforced rather than incidental.
+
+Measurement came before the fixes, which is why they have numbers rather than adjectives. `c8` writes `coverage/lcov.info` from the offline suites, following both programs into the child processes the tests drive them as, and Codecov receives it over GitHub OIDC, so no long-lived token exists in the repository. The gate is non-regression rather than a figure picked by taste: Codecov compares each commit against its base, and the `c8` floors sit below the measured baseline as a local backstop. The README gained npm and coverage badges only after an upload had actually landed and processed, since a badge is a claim about a working pipeline.
+
+Reviewing that CI found four things wrong with it, all worth naming because none were in the code under test. The upload inherited GitHub's implicit `success()`, so a report that had already been written was discarded whenever an earlier step failed, losing the coverage diff exactly when a run went red. It also held `id-token: write` in the same job that runs `npm install -g` and installs a plugin, and any step in a job can mint that token, so third-party postinstall code could have requested an OIDC identity asserting this repository; the upload is now a separate job that holds the permission and runs nothing else. Collapsing three named suite steps into one meant a failure no longer said which suite broke. And threshold checking inside the suite runs made `c8` compute coverage from a partial run and print a threshold error after a genuine test failure, blaming a regression that did not exist; fixing that immediately exposed the same mistake one level down, where `check-coverage` in the config applied to every invocation and failed each per-suite run on its own partial coverage.
+
+Also from that review: the c8 configuration moved to `.c8rc.json`, which is not in the published `files` allowlist, so its explanatory comment stopped shipping to npm inside `package.json`; c8's raw V8 dumps moved out of `coverage/`, fixing the cause that an uploader exclusion flag had been papering over; the `lcov` reporter became `lcovonly`, having been rendering an HTML report nothing reads; the functions floor dropped from 100, which tolerated nothing; and the Codecov CLI is pinned, because the action defaults to fetching the latest and a failing upload is deliberately allowed to fail the build.
 
 ## 0.4.0 (2026-08-18)
 
