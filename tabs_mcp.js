@@ -3,8 +3,9 @@
 //
 // The Claude in Chrome bridge can only see tabs inside its own tab group, and
 // attaching a debugger needs the user to turn on remote debugging. Neither is
-// required to answer "what is open": Chrome writes the live session to
-// <profile>/Sessions/Session_* and that file parses without a port or a group.
+// required to answer "what is open": Chrome and Chromium write live session
+// data below each profile, and readable files parse without a port or a group.
+// Encrypted session storage is reported explicitly rather than decrypted.
 //
 // No third-party dependencies. Read only: this never drives a page. Requires
 // Node 22 or later.
@@ -373,7 +374,10 @@ function redactUrl(url) {
 
 function render(groups, { includeUrls = true, fullUrls = false } = {}) {
   if (!groups.length) {
-    return 'No Chrome session file found. Looked for <user data dir>/<profile>/Sessions/Session_*.';
+    return (
+      'No Chrome or Chromium session data found. Looked for ' +
+      '<user data dir>/<profile>/{Sessions,Sessions_Encrypted}/Session_*.'
+    );
   }
 
   const unreadable = groups.filter((g) => g.status === 'unreadable');
@@ -451,8 +455,8 @@ const TOOLS = [
   {
     name: 'list_open_tabs',
     description:
-      'List every tab open in Chrome, across every window and every profile on ' +
-      'this machine, by reading the browser session file from disk. Needs no ' +
+      'List the tabs recoverable from readable Chrome and Chromium session data, ' +
+      'across every window and recognized profile on this machine. Needs no ' +
       'remote debugging port, no extension and no tab group, so it sees tabs the ' +
       "Claude in Chrome bridge cannot, and it is not limited to one profile. Use " +
       'it for any read-only question about what is open. It cannot drive a page, ' +
@@ -464,8 +468,10 @@ const TOOLS = [
       "scheme (blob:, filesystem:, view-source:) shows only its scheme, since its " +
       'path can itself be another URL with credentials embedded. Pass full_urls ' +
       'to get the raw URL instead. This is a best-effort reader of an undocumented ' +
-      'Chromium format: a session file in a version this parser has not confirmed, ' +
-      'or one cut off mid-write, is reported as unreadable rather than as empty.',
+      'Chromium format. A file in an unconfirmed version, an encrypted profile, or ' +
+      'an initial snapshot that never reached its completion marker is reported ' +
+      'rather than treated as empty; a completed snapshot cut off during later ' +
+      'incremental updates returns its recovered tabs with an incomplete warning.',
     inputSchema: {
       type: 'object',
       properties: {

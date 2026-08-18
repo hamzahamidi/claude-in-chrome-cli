@@ -7,11 +7,11 @@ description: Use before controlling Chrome for anything that needs the user's re
 
 ## First: is the question "what is open?"
 
-Then do not drive a browser at all. Call **`list_open_tabs`**, from the `chrome-tabs` server this plugin ships. It reads Chrome's session file from disk, so it sees every tab in every window and every profile, with no debugging port, no extension and no tab group. Measured on one machine: the bridge could see 4 tabs, `list_open_tabs` saw 29, of which 25 were outside the group.
+Then do not drive a browser at all. Call **`list_open_tabs`**, from the `chrome-tabs` server this plugin ships. It reads Chrome and Chromium session data from disk, so it sees every tab it can recover across readable profiles, with no debugging port, no extension and no tab group. Encrypted, unsupported or unreadable profiles are reported rather than silently counted as empty. Measured on one machine: the bridge could see 4 tabs, `list_open_tabs` saw 29, of which 25 were outside the group.
 
-Pass `include_urls: false` for counts and hosts only, or `profile` to narrow to one Chrome profile.
+Pass `include_urls: false` for counts and hosts only, or `profile` to narrow to one Chrome profile. URLs are redacted to a safe origin and path by default; `full_urls: true` exposes the raw URL, which can contain credentials, query strings or session tokens, so use it only when the raw value is necessary.
 
-It returns URLs and titles, not page content, and it cannot drive a page. It also does not track which tab or window currently has focus, only which page each tab is showing: do not use it to answer "which tab is the user looking at right now". For either page content or drive, read on.
+It returns URLs and titles, not page content, and it cannot drive a page. It also does not track which tab or window currently has focus, only which page each tab is showing, and Chromium history-pruning events can leave that page stale: do not use it to answer "which tab is the user looking at right now". For either page content or drive, read on.
 
 ## Overview
 

@@ -399,7 +399,9 @@ check('redactUrl falls back to (unparseable) on an invalid url', () => {
 });
 
 check('render reports no session file found for an empty group list', () => {
-  assert.ok(render([]).includes('No Chrome session file found'));
+  const text = render([]);
+  assert.ok(text.includes('No Chrome or Chromium session data found'), text);
+  assert.ok(text.includes('{Sessions,Sessions_Encrypted}/Session_*'), text);
 });
 
 check('render reports no open tabs when every group is empty but readable', () => {
