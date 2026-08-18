@@ -44,6 +44,8 @@ Theme: the installed plugin cache contains runtime files, not the project's test
 
 Non-goals: no parser behavior change, no new MCP tool, and no change to `cic.sh` semantics. This is packaging hygiene only.
 
+Unanticipated consequence, recorded because moving a plugin's path is not a private change: ClaudePluginHub derives a listing's identity from owner, plugin name and path within the repository, so relocating the plugin duplicated the directory entry rather than moving it. The root-path listing froze at 0.2.2 describing `cic.sh`, and its badge kept answering HTTP 200 while rendering "not found". Consolidating on the new path cost the short slug, the listing's traffic history and four days of stars. Check how a directory keys your listing before changing `source`.
+
 ## v0.4.0: cic in Node, cic.sh retired (shipped 2026-08-18)
 
 Theme: one implementation, and it stops lying to pipelines.
@@ -64,7 +66,7 @@ Non-goals: no friendly verbs, no retries, no persistence. This is the biggest re
 
 Risk: deleting `cic.sh` breaks anyone who curled it. Accepted, versioned, and documented in the migration section.
 
-## v0.4.1: measure, harden, automate
+## v0.4.1: measure, harden, automate (shipped 2026-08-18)
 
 Theme: know what the tests actually cover, close the validation gaps 0.4.0 shipped with, and stop publishing by hand.
 
