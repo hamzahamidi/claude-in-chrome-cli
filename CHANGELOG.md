@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.1 (unreleased)
+
+Closes the validation gaps 0.4.0 shipped with, listed there as known limits. Coverage was measured first, so these fixes have a number behind them rather than a claim: 94.95% of statements and 82.55% of branches before, 95.31% and 84.71% after, with the floor set from the earlier baseline so the new code had to be covered rather than merely added.
+
+The initialize response now gets the same validator as a tool reply: exactly one of `result` and `error`, an error with an integer code and a string message, and a `protocolVersion` that is actually a string. A malformed handshake exits 3, not 2, and a test asserts the request is never dispatched in that case, because nothing has reached the browser yet and the difference between those two codes is the only thing telling a caller whether a retry is safe.
+
+Member validation replaces container validation. An outer array being present said nothing about what was in it, so a `content` entry could be a bare string, a text part could carry no `text`, and a tool could have no `name`. Error codes are checked as integers rather than any number, since 1.5 is not a JSON-RPC code, and `isError` as a boolean rather than anything truthy, since it decides the exit code and `"yes"` should not quietly mean failure.
+
+Worth being exact about one of the reported symptoms: plain and `--json` did not actually disagree on exit codes for any of these replies. What differed was their output, and what was wrong was that both agreed on success. A malformed text part printed an empty line in plain mode and the raw object under `--json`, and both exited 0. Both now exit 2. The suite gained a table that runs every hostile mode through both modes and asserts the exit codes match, plus one asserting every non-zero `--json` exit carries a well-formed envelope, so the agreement is now enforced rather than incidental.
+
 ## 0.4.0 (2026-08-18)
 
 Replaces `cic.sh` with a Node client and deletes the shell implementation in the same release. Both copies are gone: the repository root one that the curl instructions pointed at, and the plugin's bundled copy. The script stays fetchable from the `v0.2.x` and `v0.3.x` tags, and the README carries a migration table for every invocation form it documented.

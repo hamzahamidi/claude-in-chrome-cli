@@ -1,6 +1,6 @@
 {
   "name": "claude-in-chrome-cli",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Call Claude in Chrome MCP tools from the shell. Drives your real, logged-in Chrome from scripts, cron jobs, and agents that cannot hold an MCP connection.",
   "bin": {
     "cic": "plugins/claude-in-chrome/bin/cic.js"
