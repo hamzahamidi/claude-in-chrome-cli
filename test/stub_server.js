@@ -41,6 +41,9 @@ const callResult = (id) => ({
   result: { content: [{ type: 'text', text: 'stub replied' }] },
 });
 
+// Well past a pipe buffer, which is where output used to be cut off.
+const BIG_BYTES = 1024 * 1024;
+
 function replyTo(message) {
   const { id, method } = message;
   // A notification carries no id and must never be answered.
@@ -87,12 +90,36 @@ function replyTo(message) {
 
   if (mode === 'never-reply') { return; }
 
+  // A result far larger than a pipe buffer. Truncation here is silent data
+  // loss, and page text is exactly what people pipe out of this tool.
+  if (mode === 'big') {
+    send({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: 'x'.repeat(BIG_BYTES) }] } });
+    return;
+  }
+
+  // A reply that agreed to nothing: neither result nor error. Reporting success
+  // on this is the shell version's exit-0-on-failure bug in a new place.
+  if (mode === 'no-result') {
+    send({ jsonrpc: '2.0', id });
+    return;
+  }
+
   const reply = method === 'tools/list' ? toolsListResult(id) : callResult(id);
   if (delayMs) { setTimeout(() => send(reply), delayMs); } else { send(reply); }
 }
 
 if (mode === 'spawn-failure') { process.exit(9); }
 if (mode === 'stderr') { process.stderr.write('stub: the extension is not connected\n'); }
+
+// A child that refuses SIGTERM and never replies, to prove the client escalates
+// rather than leaving one of these behind on every call.
+if (mode === 'ignore-sigterm') {
+  process.on('SIGTERM', () => {});
+  if (process.env.CIC_STUB_PIDFILE) {
+    require('fs').writeFileSync(process.env.CIC_STUB_PIDFILE, String(process.pid));
+  }
+  setInterval(() => {}, 1000);
+}
 
 let buffer = '';
 process.stdin.on('data', (chunk) => {

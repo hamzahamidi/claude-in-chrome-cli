@@ -118,19 +118,29 @@ else
   check "the plugin's bundled cic runs from the installed cache" 1
 fi
 
-# Installation path 2, npm: the published tarball carries the bin, and the bin
-# npm would link runs. `npm pack` builds exactly what `npm publish` would.
+# Installation path 2, npm. `npm pack` builds exactly what `npm publish` would
+# upload, and installing that tarball globally into a throwaway prefix is the
+# only way to prove the `cic` command users actually type gets created and runs.
+# Inspecting the tarball is not enough: it says nothing about the bin link.
 PACK_DIR="$FAKE_HOME/pack"
-mkdir -p "$PACK_DIR"
-BIN_PATH=$(node -p "require('$REPO/package.json').bin.cic")
+NPM_PREFIX="$FAKE_HOME/npm-global"
+NPM_LOG="$FAKE_HOME/npm-install.log"
+mkdir -p "$PACK_DIR" "$NPM_PREFIX"
 if (cd "$REPO" && npm pack --pack-destination "$PACK_DIR" >/dev/null 2>&1) &&
-  TARBALL=$(find "$PACK_DIR" -name '*.tgz' | head -1) && [ -n "$TARBALL" ] &&
-  tar -xzf "$TARBALL" -C "$PACK_DIR" &&
-  [ -f "$PACK_DIR/package/$BIN_PATH" ] &&
-  [ "$(node "$PACK_DIR/package/$BIN_PATH" --version)" = "$VERSION" ]; then
-  check "the npm tarball carries a working cic bin" 0
+  TARBALL=$(find "$PACK_DIR" -name '*.tgz' | head -1) && [ -n "$TARBALL" ]; then
+  check "npm pack builds a publishable tarball" 0
 else
-  check "the npm tarball carries a working cic bin" 1
+  check "npm pack builds a publishable tarball" 1
+fi
+
+if [ -n "${TARBALL:-}" ] &&
+  npm install -g "$TARBALL" --prefix "$NPM_PREFIX" >"$NPM_LOG" 2>&1 &&
+  [ -x "$NPM_PREFIX/bin/cic" ] &&
+  [ "$(PATH="$NPM_PREFIX/bin:$PATH" cic --version)" = "$VERSION" ]; then
+  check "npm install -g creates a cic command that runs" 0
+else
+  check "npm install -g creates a cic command that runs" 1
+  [ -f "$NPM_LOG" ] && sed 's/^/  /' "$NPM_LOG"
 fi
 
 if [ "$fails" -eq 0 ]; then

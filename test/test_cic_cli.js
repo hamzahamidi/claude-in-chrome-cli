@@ -130,5 +130,68 @@ check('list prints only the first description line',
 check('call prints the text content',
   run(['call', 'navigate', '{}']).stdout.trim(), 'stub replied');
 
+// ---- large output must not be truncated -----------------------------------
+
+// process.exit() after writing discards whatever has not drained, which cut a
+// 2 MB page-text result down to one pipe buffer in both output modes.
+const BIG_BYTES = 1024 * 1024;
+const bigPlain = run(['call', 'get_page_text', '{}'], { mode: 'big' });
+check('a result larger than a pipe buffer survives intact',
+  bigPlain.stdout.length, BIG_BYTES + 1);
+const bigJson = run(['call', 'get_page_text', '{}', '--json'], { mode: 'big' });
+check('a large --json result survives intact',
+  JSON.parse(bigJson.stdout).content[0].text.length, BIG_BYTES);
+
+// ---- a reply that agreed to nothing ---------------------------------------
+
+const noResult = run(['call', 'navigate', '{}'], { mode: 'no-result' });
+check('a reply with neither result nor error is unknown, not success', noResult.status, 2);
+const noResultJson = jsonLine(run(['call', 'navigate', '{}', '--json'], { mode: 'no-result' }));
+check('--json says unknown for a reply with no result',
+  noResultJson && noResultJson.kind, 'unknown_outcome');
+
+// ---- --json owes an envelope on every failure ------------------------------
+
+// The parser used to discard its options on the first bad flag, so --json
+// callers got exit 64 and an empty stdout to parse.
+const timeoutJson = jsonLine(run(['call', 'navigate', '{}', '--timeout', 'soon', '--json']));
+check('--json usage envelope survives a bad flag earlier in the line',
+  timeoutJson && timeoutJson.kind, 'usage');
+check('--json usage envelope carries the exit code',
+  timeoutJson && timeoutJson.exit, 64);
+
+// isError used to print the raw MCP result under --json, not the frozen shape.
+const isErrorJson = jsonLine(run(['call', 'navigate', '{}', '--json'], { mode: 'is-error' }));
+check('--json isError is the error envelope, not the raw result',
+  isErrorJson && isErrorJson.kind, 'tool_error');
+check('--json isError carries the tool text as the message',
+  isErrorJson && isErrorJson.message, 'the tool refused');
+check('--json isError still exits 1',
+  run(['call', 'navigate', '{}', '--json'], { mode: 'is-error' }).status, 1);
+
+// ---- extra positional arguments are a usage error --------------------------
+
+check('list takes no arguments', run(['list', 'unexpected']).status, 64);
+check('call rejects a fourth argument',
+  run(['call', 'navigate', '{}', 'unexpected']).status, 64);
+
+// ---- the child is reaped, not merely signalled -----------------------------
+
+// A child ignoring SIGTERM used to outlive the call, so a cron job calling cic
+// in a loop accumulated one stranded bridge per run.
+const pidFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'cic-pid-')), 'pid');
+run(['call', 'navigate', '{}'], {
+  mode: 'ignore-sigterm',
+  env: { CIC_STUB_PIDFILE: pidFile },
+  timeoutSeconds: 1,
+});
+let stubAlive = true;
+try {
+  process.kill(Number(fs.readFileSync(pidFile, 'utf8')), 0);
+} catch {
+  stubAlive = false;
+}
+check('a child that ignores SIGTERM is killed rather than stranded', stubAlive, false);
+
 console.log(failures ? `\n${failures} failed` : '\nall passed');
 process.exit(failures ? 1 : 0);

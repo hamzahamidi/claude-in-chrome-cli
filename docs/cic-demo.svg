@@ -6,7 +6,7 @@
 <circle cx="58" cy="18" r="5.5" fill="#28c840"/>
 <text x="430.0" y="23" fill="#8b8178" text-anchor="middle" font-size="12">claude-in-chrome-cli</text>
 <text x="22" y="58" fill="#7cc379">$</text>
-<text x="40" y="58" fill="#e6e1db">./cic.sh --list</text>
+<text x="40" y="58" fill="#e6e1db">cic list</text>
 <text x="22" y="79" fill="#8b8178">-</text>
 <text x="38" y="79" fill="#da7756">javascript_tool</text>
 <text x="167.5" y="79" fill="#8b8178">:: Execute JavaScript code in the context of the current page</text>

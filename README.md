@@ -139,7 +139,7 @@ The exact set depends on your extension version. Run `cic list` for the live lis
 | `tabs_context_mcp` / `tabs_create_mcp` / `tabs_close_mcp` | Manage the MCP tab group |
 | `list_connected_browsers` / `select_browser` / `switch_browser` | Pick which Chrome to drive |
 
-Argument shapes come from the extension, not from this script. The `--list` output includes each tool's description, which documents its arguments.
+Argument shapes come from the extension, not from `cic`. The `cic list` output includes each tool's description, which documents its arguments.
 
 One tool does not come from the extension. The plugin ships [`tabs_mcp.js`](plugins/claude-in-chrome/tabs_mcp.js) as a second MCP server, `chrome-tabs`:
 

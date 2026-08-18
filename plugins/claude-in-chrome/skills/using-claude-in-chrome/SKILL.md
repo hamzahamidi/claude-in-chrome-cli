@@ -46,7 +46,7 @@ Never enter the user's credentials to force a session. Ask them to complete SSO 
 - **To reach a page the user already has open, re-open it.** `tabs_create_mcp` then `navigate` to the same URL gets the same profile and the same cookies at no cost to the user. Anything you would reload anyway, a performance measurement for instance, never needs their original tab.
 - **The bridge cannot open `chrome://` URLs.** `navigate` prefixes the scheme and lands on `https://chrome://…`. Ask the user to open those pages themselves.
 - **Navigate, then verify in a separate call.** A navigate can report success while the tab stays on `chrome://newtab`. Check `location.hostname` before acting.
-- **Allow 35 to 40 seconds** after navigating a slow page. A shorter wait returns empty output with no error, which reads like failure.
+- **A slow page needs a bigger ceiling, not a longer wait.** `cic` returns the moment the bridge replies, so `--timeout` costs nothing when the page is quick; raise it to 60 for a slow navigation rather than accepting a truncated answer. Reading a page before it has settled still returns empty content, which reads like failure, so verify rather than assume (above).
 - **The bridge redacts secret-shaped values.** Anything returned containing a query string, cookie, JWT shape or base64 comes back as `[BLOCKED: …]`. Return parsed fields and counts, never the URL you fetched, and build a literal `?` with `String.fromCharCode(63)` when a key would otherwise contain one.
 - **Auto-refreshing and log-heavy pages freeze the renderer** at the 45 second CDP limit. Turn refresh off, or fetch from a static page on the same origin.
 - Tab ids change after a Chrome restart.
