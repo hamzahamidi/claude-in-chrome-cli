@@ -193,5 +193,64 @@ try {
 }
 check('a child that ignores SIGTERM is killed rather than stranded', stubAlive, false);
 
+// ---- a flag must never be eaten as another flag's value --------------------
+
+// `--timeout --json` consumed --json as the timeout value, losing the flag that
+// decides how the resulting error is reported.
+const eatenFlag = run(['call', 'navigate', '{}', '--timeout', '--json']);
+check('--timeout does not swallow a following flag', eatenFlag.status, 64);
+const eatenFlagJson = jsonLine(eatenFlag);
+check('--json survives being written after a valueless --timeout',
+  eatenFlagJson && eatenFlagJson.kind, 'usage');
+check('a --timeout with no value at all is a usage error',
+  run(['call', 'navigate', '{}', '--timeout']).status, 64);
+
+// ---- replies that are not JSON-RPC messages -------------------------------
+
+// `null`, a number and an array all parse as JSON. Dereferencing them threw an
+// uncaught TypeError out of the stdout handler and killed the process.
+const nullReply = run(['call', 'navigate', '{}'], { mode: 'null-reply', timeoutSeconds: 1 });
+check('a literal null reply does not crash the client', nullReply.status, 2);
+check('a literal null reply reports no usable reply, not a stack trace',
+  /Unhandled|TypeError/.test(nullReply.stderr), false);
+
+const noEnvelope = run(['call', 'navigate', '{}'], { mode: 'no-envelope', timeoutSeconds: 2 });
+check('a reply without a JSON-RPC 2.0 envelope is unknown, not success', noEnvelope.status, 2);
+const noEnvelopeJson = jsonLine(run(['call', 'navigate', '{}', '--json'], { mode: 'no-envelope', timeoutSeconds: 2 }));
+check('--json says unknown for an unenveloped reply',
+  noEnvelopeJson && noEnvelopeJson.kind, 'unknown_outcome');
+
+// ---- a reader that goes away mid-write ------------------------------------
+
+// EPIPE arrives twice, through the write callback and as a stream error event.
+// Without a listener for the second, Node rethrew it and printed a stack trace
+// after the output had already been delivered.
+const piped = spawnSync('sh', ['-c',
+  `${JSON.stringify(process.execPath)} ${JSON.stringify(CIC)} call get_page_text '{}' | head -c 1`], {
+  encoding: 'utf8',
+  env: { ...process.env, CIC_CLAUDE_BIN: process.execPath, CIC_CLAUDE_ARGS: STUB, CIC_STUB_MODE: 'big' },
+});
+check('a reader closing early does not produce a stack trace',
+  /Unhandled|EPIPE/.test(piped.stderr), false);
+
+// ---- shutdown when something else holds the pipe --------------------------
+
+// A descendant of the bridge holding the bridge's stdout kept the client alive
+// indefinitely, because terminate() returned early for an already-exited child
+// and never released the pipes.
+const readyFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'cic-linger-')), 'ready');
+const startedAt = Date.now();
+const lingered = run(['call', 'get_page_text', '{}'], {
+  mode: 'linger',
+  env: { CIC_STUB_READY: readyFile },
+  timeoutSeconds: 10,
+});
+const lingerSeconds = (Date.now() - startedAt) / 1000;
+check('a bridge whose descendant holds stdout still lets the client exit', lingered.status, 0);
+check('and the client does not wait on that pipe to do it', lingerSeconds < 9, true);
+try {
+  process.kill(Number(fs.readFileSync(path.join(path.dirname(readyFile), 'ready'), 'utf8')), 0);
+} catch { /* nothing to clean up */ }
+
 console.log(failures ? `\n${failures} failed` : '\nall passed');
 process.exit(failures ? 1 : 0);

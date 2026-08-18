@@ -104,6 +104,34 @@ function replyTo(message) {
     return;
   }
 
+  // Valid JSON that is not a message. Dereferencing it threw an uncaught
+  // TypeError straight out of the client's stream handler.
+  if (mode === 'null-reply') {
+    process.stdout.write('null\n');
+    return;
+  }
+
+  // Addressed to the right request but not in a JSON-RPC 2.0 envelope, which
+  // used to be accepted and reported as a success.
+  if (mode === 'no-envelope') {
+    process.stdout.write(JSON.stringify({ id, result: { content: [{ type: 'text', text: 'unenveloped' }] } }) + '\n');
+    return;
+  }
+
+  // Replies, then exits, leaving a detached descendant holding its stdout. That
+  // pipe alone used to keep the client alive forever.
+  if (mode === 'linger') {
+    const readyFile = process.env.CIC_STUB_READY;
+    const { spawn, spawnSync } = require('child_process');
+    spawn(process.execPath, ['-e', "require('fs').writeFileSync(process.env.R,'up');setInterval(()=>{},1000)"],
+      { stdio: ['ignore', 1, 'ignore'], detached: true, env: { ...process.env, R: readyFile } }).unref();
+    // Do not exit before the descendant is actually holding the pipe.
+    while (!require('fs').existsSync(readyFile)) { spawnSync(process.execPath, ['-e', '']); }
+    send(callResult(id));
+    setTimeout(() => process.exit(0), 30);
+    return;
+  }
+
   const reply = method === 'tools/list' ? toolsListResult(id) : callResult(id);
   if (delayMs) { setTimeout(() => send(reply), delayMs); } else { send(reply); }
 }

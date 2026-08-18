@@ -70,6 +70,24 @@ class CicError extends Error {
 // the streams are empty.
 let stdoutBroken = false;
 
+// A broken pipe reaches us twice: once through the write callback below, and
+// once as an 'error' event on the stream itself. Without a listener for the
+// second, Node rethrows it, so piping a large result into `head -c 1` died with
+// a stack trace after the output had already been delivered.
+function absorbStreamError(stream) {
+  stream.on('error', (error) => {
+    if (error && error.code === 'EPIPE') {
+      if (stream === process.stdout) { stdoutBroken = true; }
+      return;
+    }
+    // Anything else is worth saying once, but never worth crashing over: the
+    // exit code has already been decided by then.
+    try { process.stderr.write(`cic: ${stream === process.stdout ? 'stdout' : 'stderr'} failed: ${error && error.message}\n`); } catch { /* nothing left to write to */ }
+  });
+}
+absorbStreamError(process.stdout);
+absorbStreamError(process.stderr);
+
 function write(stream, text) {
   return new Promise((resolve, reject) => {
     if (stdoutBroken && stream === process.stdout) { resolve(); return; }
@@ -110,18 +128,40 @@ function normalizeExit(exitCode, requestWritten) {
   return requestWritten ? EXIT.UNKNOWN : EXIT.TRANSPORT;
 }
 
-/** SIGTERM, then SIGKILL if that is ignored, and wait for the child to go. */
+/**
+ * SIGTERM, then SIGKILL if that is ignored, and wait for the child to go.
+ *
+ * Releasing the pipes is not optional cleanup. A descendant of the bridge can
+ * hold the bridge's stdout open after the bridge itself has exited, and that
+ * handle alone kept this process alive indefinitely with nothing left to read.
+ */
 function terminate(child) {
-  if (!child || child.exitCode !== null || child.signalCode !== null) {
+  if (!child) { return Promise.resolve(); }
+
+  const release = () => {
+    for (const stream of [child.stdin, child.stdout, child.stderr]) {
+      try { if (stream) { stream.destroy(); } } catch { /* already gone */ }
+    }
+    try { child.unref(); } catch { /* not refcounted */ }
+  };
+
+  if (child.exitCode !== null || child.signalCode !== null) {
+    release();
     return Promise.resolve();
   }
+
   return new Promise((resolve) => {
+    const done = () => {
+      clearTimeout(escalate);
+      clearTimeout(giveUp);
+      release();
+      resolve();
+    };
     const escalate = setTimeout(() => {
       try { child.kill('SIGKILL'); } catch { /* already gone */ }
     }, TERMINATE_GRACE_MS);
     // Never hang a caller on a child that cannot be reaped at all.
-    const giveUp = setTimeout(resolve, TERMINATE_GRACE_MS * 2);
-    const done = () => { clearTimeout(escalate); clearTimeout(giveUp); resolve(); };
+    const giveUp = setTimeout(done, TERMINATE_GRACE_MS * 2);
     child.once('close', done);
     try { child.stdin.destroy(); } catch { /* already closed */ }
     try { child.kill('SIGTERM'); } catch { done(); }
@@ -142,7 +182,15 @@ function parseArguments(argv) {
     else if (argument === '-h' || argument === '--help') { options.help = true; }
     else if (argument === '-v' || argument === '--version') { options.version = true; }
     else if (argument === '--timeout') {
-      const raw = argv[++i];
+      // Never swallow the next token when it is itself a flag: consuming
+      // `--json` as the timeout value lost the very flag that decides how this
+      // error gets reported.
+      const raw = argv[i + 1];
+      if (raw === undefined || raw.startsWith('-')) {
+        note(`--timeout wants a positive number of seconds, got ${raw === undefined ? 'nothing' : raw}`);
+        continue;
+      }
+      i++;
       const value = Number(raw);
       if (!Number.isFinite(value) || value <= 0) {
         note(`--timeout wants a positive number of seconds, got ${raw}`);
@@ -174,7 +222,19 @@ function requestReply(child, id, timeoutSeconds) {
     const onLine = (line) => {
       let message;
       try { message = JSON.parse(line); } catch { return; }
+      // Valid JSON is not necessarily a message: `null`, a number and an array
+      // all parse, and dereferencing them threw an uncaught TypeError out of
+      // this stream handler. Anything that is not an object is not addressed
+      // to us, so it is log noise and gets skipped.
+      if (message === null || typeof message !== 'object' || Array.isArray(message)) { return; }
       if (message.id !== id) { return; }
+      // Addressed to us, but not in an envelope the protocol defines. Trusting
+      // its result would mean reporting success for something unparsed.
+      if (message.jsonrpc !== '2.0') {
+        finish(reject, new CicError(EXIT.UNKNOWN,
+          `the bridge replied to request ${id} without a JSON-RPC 2.0 envelope, so the outcome is unknown.`));
+        return;
+      }
       finish(resolve, message);
     };
 
