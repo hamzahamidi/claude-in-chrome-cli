@@ -12,7 +12,7 @@ Three rules hold across every release below.
 2. **The exit-code contract is defined at 0.4.0 and frozen from then on:** 0 success, 1 tool error (a JSON-RPC error or `isError: true`), 2 outcome unknown (the `tools/call` request was written and no usable reply came back, whether by timeout, the child exiting, a malformed reply or an I/O failure), 3 failure strictly before the `tools/call` request was written (`claude` missing or failing to spawn, the initialize handshake failing, an unsupported protocol version), 64 usage error or invalid arguments JSON. The boundary between 2 and 3 is whether the request went out: exit 3 means the browser cannot have acted, so it is the only class safe to retry. With `--json`, every failure emits one line on stdout in the frozen shape `{"error": true, "kind": "tool_error" | "unknown_outcome" | "transport" | "usage", "exit": 1 | 2 | 3 | 64, "message": "<human readable>"}`, so a machine caller never has to parse an empty stream. The retired `cic.sh` violated this contract by exiting 0 on tool errors; the Node CLI fixed it rather than preserving that behavior.
 3. **`plugin.json` is the single source of truth for the version.** CI asserts every other version constant matches it.
 
-One boundary is deliberately outside the release sequence: this project will not grow a second Chrome DevTools Protocol implementation for arbitrary daily-Chrome tabs. `list_open_tabs` stays passive, `reopen-tab` will create a new managed tab from a recovered URL, and true adoption of an existing tab belongs upstream in the Claude-in-Chrome extension or bridge. Users who need full-browser CDP access should use Chrome DevTools MCP.
+One boundary is deliberately outside the release sequence: this project will not grow a second Chrome DevTools Protocol implementation for arbitrary daily-Chrome tabs. `list_open_tabs` stays passive. Guided adoption may ask the user to move an existing live tab into Claude's native group, and `reopen-tab` may create a managed tab from a recovered URL when cooperation is unavailable; automatically adopting a tab belongs upstream in the Claude-in-Chrome extension or bridge. Users who need full-browser CDP access should use Chrome DevTools MCP.
 
 ## v0.2.3: docs tell the truth (shipped 2026-08-17)
 
@@ -120,14 +120,20 @@ Theme: solve lifecycle and transport gaps before adding spelling shortcuts.
 
 Deferred, not rejected: `navigate`, `text`, `find` and `js`. They improve discoverability and avoid nested JSON quoting, especially in PowerShell, but they do not precede connection, lifecycle and file-output capabilities.
 
-## v0.8.0: reopen a discovered tab safely
+## v0.8.0: user-approved adoption, with safe reopening as fallback
 
-Theme: connect passive discovery to a managed, actionable tab without claiming to adopt the original renderer.
+Theme: preserve an existing live tab when the user can cooperate, and keep a deterministic noninteractive path when they cannot.
 
-- `reopen-tab` searches the local parser by redacted URL metadata and title, resolves a unique candidate (or reports ambiguity), creates a Claude-managed tab, navigates it to the recovered URL and returns the new actionable `tabId`.
-- The raw URL remains inside the process: it is read by importing the parser, passed directly to the MCP child over stdin, and never placed in process arguments, stdout candidates, logs, errors or shell history. Initial support is limited to ordinary HTTP(S) URLs.
-- The name is intentional. Reopening does not preserve DOM state, form values, scroll position, JavaScript state, navigation history or active connections.
-- Open an upstream request for a true `adopt_tab` or `add_tab_to_group` bridge operation. Do not simulate adoption with CDP inside this project.
+- Productize guided adoption in `cic shell`, where a human prompt and one persistent `BridgeSession` already exist. Detection, confirmation, adoption, cleanup and the first browser action all happen on that same session. A manually adopted `tabId` is not promised to survive a fresh MCP session until a live integration test proves it, even though ids returned by `tabs_create_mcp` already compose across one-shot calls.
+- Establish a real drop target before taking the baseline. Call `tabs_context_mcp`; if the managed group has no tabs, create a temporary tab with `tabs_create_mcp`, wait until its exact id appears, then snapshot the current managed ids. The placeholder is recorded and later addressed only by that id.
+- Explain that moving a tab into Claude's group grants Claude access to read and interact with its live authenticated page. After the user confirms and physically moves exactly one tab, poll `tabs_context_mcp` through the same session. The move itself is the consent action; the CLI prompt is additional protection.
+- Identify the adopted tab only as one stable new live id: the same singleton set difference must appear on two consecutive polls. Title, URL, profile and session-file metadata may guide the user but never establish identity. Zero additions before timeout, multiple additions, a disappearing placeholder or a bridge disconnect aborts without choosing a tab.
+- Show the one detected tab using redacted live metadata and ask the user to confirm it before the first action. If they reject it, take no action on the page, instruct them to remove it from Claude's group, and poll until it disappears; then close the placeholder and session. Never close or ungroup the user's tab automatically.
+- After successful adoption, close the placeholder by its exact id and continue over the same session. Placeholder cleanup failure is a warning rather than a reason to invalidate an otherwise successful adoption.
+- Keep `cic session --jsonl` as generic MCP calls over a persistent connection. A caller may compose the same state machine and provide its own confirmation channel; v0.8 does not add interactive events or an `adopt` workflow operation to the JSONL contract.
+- Keep `reopen-tab` as the unattended fallback when the user declines, cannot intervene or does not need the original renderer state. It resolves a unique passive candidate, supports ordinary HTTP(S) URLs first, and keeps the raw URL inside the process: never in arguments, candidate output, logs, errors or shell history. Reopening remains explicit that it loses DOM state, form contents, scroll position, navigation history and live connections.
+- Request one upstream `request_tab_adoption` tool backed by an extension-native picker. The extension enumerates live tabs locally, the user selects and approves exactly one, and only the adopted `tabId` or an explicit cancellation crosses the bridge. Its contract defines whether a cross-window adoption creates a managed group beside the tab or moves the tab, and never moves it invisibly.
+- Drive the state machine with an offline scripted bridge, including transient deltas and every cleanup path, and keep one manual Chrome integration check for group creation, live adoption and the still-unproven cross-session behavior. Do not implement CDP attachment inside this project.
 
 ## v0.9.0: optional daemon
 
