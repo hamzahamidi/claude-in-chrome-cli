@@ -7,7 +7,7 @@
 set -u
 
 HERE=$(cd "$(dirname "$0")" && pwd)
-SERVER="$HERE/../tabs_mcp.js"
+SERVER="$HERE/../plugins/claude-in-chrome/tabs_mcp.js"
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 

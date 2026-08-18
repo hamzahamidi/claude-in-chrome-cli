@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.1 (unreleased)
+
+Moves the plugin's runtime files into `plugins/claude-in-chrome/` and points the marketplace's `source` at that subdirectory instead of the repository root. Verified directly against the real `claude` plugin CLI before relying on it: with `source` set to a subdirectory, the installed cache under `~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/` contains only that subdirectory's files. Previously the whole repository root was the plugin source, so installing `claude-in-chrome` copied `test/`, `docs/`, `ROADMAP.md` and the GitHub workflow files into Claude Code's versioned plugin cache along with the five files that actually run.
+
+`cic.sh` exists in two places until v0.4.0 retires the shell implementation: the repository root, for the standalone curl download, and a copy inside the plugin subtree, so the installed cache is self-contained. `test/test_cic_sync.sh` fails the build if the two ever diverge. Adds `test/test_plugin_install.sh`, which installs the plugin from this repo's own marketplace with isolated, throwaway `HOME` and `CLAUDE_CONFIG_DIR` values, then asserts the installed cache contains exactly the runtime allowlist and that `chrome-tabs` boots correctly from its installed `${CLAUDE_PLUGIN_ROOT}` path.
+
+Bumps `plugin.json` and `tabs_mcp.js`'s version together to 0.3.1, since the version is part of Claude Code's cache key and this is a real change to what gets installed. No parser behavior, MCP tool, or `cic.sh` semantics changed.
+
 ## 0.3.0 (2026-08-18)
 
 Adds `list_open_tabs`, a second MCP server, `chrome-tabs`, that reads Chrome and Chromium session data from disk. The extension bridge only ever sees tabs inside its own tab group; this answers "what is open" without a debugging port, an extension or a group, across every window and every readable profile on the machine, while reporting profiles it cannot read instead of counting them as empty.

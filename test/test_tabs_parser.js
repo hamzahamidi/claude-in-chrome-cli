@@ -31,7 +31,7 @@ const {
   profileDirs,
   hasEncryptedSessionData,
   ENCRYPTED_SESSIONS_DIR,
-} = require('../tabs_mcp.js');
+} = require('../plugins/claude-in-chrome/tabs_mcp.js');
 
 let fails = 0;
 
