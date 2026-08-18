@@ -44,8 +44,19 @@ jobs:
         run: npx c8 --no-clean --reporter=none node test/test_session_command.js
       - name: cic contract, handshake ordering and retries
         run: npx c8 --no-clean --reporter=none node test/test_cic_cli.js
+      # The floor measures the whole suite, and Windows deliberately runs less
+      # of it: the EPIPE pipeline and detached-descendant tests are POSIX-only,
+      # so the paths they exercise are legitimately unreached there. Judging
+      # Windows against the full-suite number fails for a reason that is not a
+      # regression, so it reports without gating while the POSIX legs enforce.
       - name: coverage report and floors
-        run: npx c8 report --check-coverage
+        shell: bash
+        run: |
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            npx c8 report
+          else
+            npx c8 report --check-coverage
+          fi
       - name: every version constant matches plugin.json
         shell: bash
         run: |
