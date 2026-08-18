@@ -1,0 +1,88 @@
+name: publish
+
+# A tag alone must not be able to ship. This runs on `v*`, proves the tag and
+# the manifest agree, runs the suites, then waits for a human to approve the
+# `npm` environment before anything reaches the registry.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: the tag and package.json must name the same version
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          package_version=$(node -p "require('./package.json').version")
+          echo "tag: $GITHUB_REF_NAME -> $tag_version"
+          echo "package.json: $package_version"
+          # Exact match. A tag that merely starts with the version would let
+          # v0.4.10 publish 0.4.1.
+          test "$tag_version" = "$package_version"
+      - name: every version constant matches package.json
+        run: |
+          package_version=$(node -p "require('./package.json').version")
+          test "$package_version" = "$(node -p "require('./plugins/claude-in-chrome/.claude-plugin/plugin.json').version")"
+          test "$package_version" = "$(node -p "require('./plugins/claude-in-chrome/tabs_mcp.js').SERVER_VERSION")"
+          test "$package_version" = "$(node plugins/claude-in-chrome/bin/cic.js --version)"
+          test "$package_version" = "$(node -p "require('./package-lock.json').packages[''].version")"
+      - name: install dev dependencies
+        run: npm ci
+      - name: install the claude CLI, for the plugin install test
+        run: npm install -g @anthropic-ai/claude-code
+      - name: offline suites, with coverage
+        run: npm run test:coverage
+      - name: both install paths carry a working cic
+        run: sh test/test_plugin_install.sh
+      - name: pack exactly what would be published
+        run: npm pack --dry-run
+
+  publish:
+    needs: verify
+    runs-on: ubuntu-latest
+    # Configured in repository settings with required reviewers, so approval is
+    # a person rather than a branch rule.
+    environment: npm
+    permissions:
+      contents: read
+      # Trusted publishing exchanges this short-lived OIDC token for the right
+      # to publish. There is no NPM_TOKEN in this repository.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          # Trusted publishing needs Node 22.14.0 or later.
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      # Node 22 ships npm 10.9.x, below the 11.5.1 that trusted publishing
+      # needs, so the upgrade is required rather than defensive.
+      - name: npm new enough for trusted publishing
+        run: |
+          npm install -g npm@latest
+          node --version
+          npm --version
+          node -e '
+            const [nodeMajor, nodeMinor] = process.versions.node.split(".").map(Number);
+            if (nodeMajor < 22 || (nodeMajor === 22 && nodeMinor < 14)) {
+              throw new Error("trusted publishing needs Node 22.14.0 or later, got " + process.versions.node);
+            }
+          '
+          npm_version=$(npm --version)
+          node -e '
+            const [major, minor, patch] = process.argv[1].split(".").map(Number);
+            const ok = major > 11 || (major === 11 && (minor > 5 || (minor === 5 && patch >= 1)));
+            if (!ok) { throw new Error("trusted publishing needs npm 11.5.1 or later, got " + process.argv[1]); }
+          ' "$npm_version"
+      # Provenance is attached automatically for a public package published
+      # over OIDC from a public repository, so there is no --provenance here.
+      - name: publish to npm
+        run: npm publish
