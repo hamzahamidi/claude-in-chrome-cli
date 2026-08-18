@@ -1,6 +1,6 @@
 {
   "name": "claude-in-chrome",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "Drive your real, logged-in Chrome from Claude Code, and list tabs across readable Chrome and Chromium profiles. Exposes the extension's browser tools through the Claude in Chrome bridge and adds a read-only list_open_tabs tool backed by local session data. Driving requires the connected extension and a running Chrome; tab listing requires Node.js 22 or later but no extension connection.",
   "author": {
     "name": "Hamza Hamidi"

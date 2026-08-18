@@ -10,19 +10,25 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    strategy:
+      # Every leg runs to completion: a Windows-only failure is the whole point
+      # of having the leg, and cancelling the others hides whether it is
+      # platform-specific.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        node: [22, 24]
+    runs-on: ${{ matrix.os }}
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: ${{ matrix.node }}
           cache: npm
       - name: install dev dependencies
         run: npm ci
-      - name: install the claude CLI, for the plugin install test
-        run: npm install -g @anthropic-ai/claude-code
       # One c8 invocation per suite, so a failure names the suite that failed.
       # --reporter=none defers reporting to the step below: c8 otherwise prints
       # threshold errors from a partial run, which reads as a coverage
@@ -30,12 +36,14 @@ jobs:
       - name: chrome-tabs SNSS parser
         run: npx c8 --reporter=none node test/test_tabs_parser.js
       - name: chrome-tabs MCP handshake
+        shell: bash
         run: npx c8 --no-clean --reporter=none sh test/test_tabs_mcp.sh
-      - name: cic exit-code contract and handshake ordering
+      - name: cic contract, handshake ordering and retries
         run: npx c8 --no-clean --reporter=none node test/test_cic_cli.js
       - name: coverage report and floors
         run: npx c8 report --check-coverage
       - name: every version constant matches plugin.json
+        shell: bash
         run: |
           plugin_version=$(node -p "require('./plugins/claude-in-chrome/.claude-plugin/plugin.json').version")
           server_version=$(node -p "require('./plugins/claude-in-chrome/tabs_mcp.js').SERVER_VERSION")
@@ -51,23 +59,39 @@ jobs:
           test "$plugin_version" = "$package_version"
           test "$plugin_version" = "$cli_version"
           test "$plugin_version" = "$lock_version"
-      - name: both install paths carry a working cic
-        run: sh test/test_plugin_install.sh
-      # Kept even when something above failed: a red run is exactly when the
-      # coverage diff is worth having, and the report is already written by then.
+      # One leg uploads. Every leg runs the same tests on the same commit, so a
+      # second upload is a duplicate, not more evidence.
       - name: keep the coverage report
-        if: always() && hashFiles('coverage/lcov.info') != ''
+        if: always() && matrix.os == 'ubuntu-latest' && matrix.node == 22 && hashFiles('coverage/lcov.info') != ''
         uses: actions/upload-artifact@v4
         with:
           name: coverage
           path: coverage/lcov.info
           retention-days: 7
 
+  # Needs the claude CLI and a global npm install, so it stays on one platform
+  # rather than pretending to prove the install path everywhere.
+  install:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: install dev dependencies
+        run: npm ci
+      - name: install the claude CLI
+        run: npm install -g @anthropic-ai/claude-code
+      - name: both install paths carry a working cic
+        run: sh test/test_plugin_install.sh
+
   # A separate job for one reason: id-token: write mints an OIDC token asserting
-  # this repository's identity, and the job above installs and runs third-party
-  # code (the claude CLI, its postinstall, plugins it fetches). Any step in a job
-  # can request that token, so it does not belong in the same job. This one runs
-  # nothing but the upload.
+  # this repository's identity, and the jobs above install and run third-party
+  # code. Any step in a job can request that token, so it does not belong in the
+  # same job. This one runs nothing but the upload.
   coverage:
     needs: test
     if: always() && (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository)

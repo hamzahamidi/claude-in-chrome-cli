@@ -3,21 +3,21 @@
 //
 // Claude Code ships a stdio MCP server, `claude --claude-in-chrome-mcp`, that
 // bridges to the Claude in Chrome extension and drives your real, logged-in
-// browser. This negotiates the MCP handshake over stdio, calls one tool, prints
-// the result, and exits.
+// browser. This asks BridgeSession to negotiate the handshake, calls one tool,
+// prints the result, and exits.
+//
+// The protocol lives in ../lib/bridge-session.js. What is left here is the
+// command line: arguments, output, retries and the exit-code contract.
 'use strict';
 
-const { spawn } = require('child_process');
+const { BridgeSession, BridgeError } = require('../lib/bridge-session.js');
 
-const VERSION = '0.4.1';
-const CLIENT_PROTOCOL = '2024-11-05';
-// Versions whose handshake this client understands. A server answering with
-// anything else has not agreed a protocol, so the request is never sent.
-const SUPPORTED_PROTOCOLS = new Set(['2024-11-05', '2025-03-26', '2025-06-18']);
+const VERSION = '0.5.0';
 const DEFAULT_TIMEOUT_SECONDS = 30;
-// How long a terminated child gets to leave before SIGKILL. A child that
-// ignores SIGTERM would otherwise outlive every call and accumulate.
-const TERMINATE_GRACE_MS = 2000;
+// Backoff between retries. Only exit-3 failures are retried, and those fail
+// fast, so this stays short enough to be worth doing inside one command.
+const RETRY_BASE_MS = 250;
+const RETRY_MAX_MS = 4000;
 
 // The exit-code contract, frozen at 0.4.0. The boundary between UNKNOWN and
 // TRANSPORT is whether the tools/call request reached the child's stdin: only
@@ -39,6 +39,7 @@ Usage:
 
 Options:
   --timeout <secs>   ceiling on how long to wait for the reply (default ${DEFAULT_TIMEOUT_SECONDS})
+  --retries <n>      retry only failures that never reached the browser (exit 3)
   --json             print the raw result object, or one error object, on one line
   -h, --help         this text
   -v, --version      print the version
@@ -48,6 +49,7 @@ Examples:
   cic call navigate '{"url":"https://example.com"}'
   cic call get_page_text '{}' --timeout 60
   cic call computer '{"action":"screenshot"}' --json
+  cic call navigate '{"url":"https://example.com"}' --retries 3
 
 Exit codes:
   0   success
@@ -56,18 +58,12 @@ Exit codes:
   3   failed before the request was sent, so the browser cannot have acted
   64  usage error, or invalid arguments JSON`;
 
-class CicError extends Error {
-  constructor(exitCode, message) {
-    super(message);
-    this.exitCode = exitCode;
-  }
-}
+class UsageError extends Error {}
 
 // Nothing here calls process.exit() after writing. Writing to a pipe is
 // asynchronous, and exiting discards whatever has not drained yet, which
 // truncated a large page-text result at the pipe buffer boundary. Every path
-// awaits its write and sets process.exitCode instead, letting Node leave once
-// the streams are empty.
+// awaits its write and sets process.exitCode instead.
 let stdoutBroken = false;
 
 // A broken pipe reaches us twice: once through the write callback below, and
@@ -80,8 +76,6 @@ function absorbStreamError(stream) {
       if (stream === process.stdout) { stdoutBroken = true; }
       return;
     }
-    // Anything else is worth saying once, but never worth crashing over: the
-    // exit code has already been decided by then.
     try { process.stderr.write(`cic: ${stream === process.stdout ? 'stdout' : 'stderr'} failed: ${error && error.message}\n`); } catch { /* nothing left to write to */ }
   });
 }
@@ -118,154 +112,30 @@ const textOf = (result) => (result.content || [])
   .map((part) => part.text)
   .join('\n');
 
-const isPlainObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
-
-/** JSON-RPC requires the code to be an integer, and MCP the message a string. */
-function describeBadError(error) {
-  if (!isPlainObject(error)) { return 'an error that is not an object'; }
-  // An integer, not merely a number: 1.5 and NaN are not JSON-RPC error codes,
-  // and accepting them means passing something meaningless to a caller
-  // deciding what to do next.
-  if (!Number.isInteger(error.code)) { return 'an error whose code is not an integer'; }
-  if (typeof error.message !== 'string') { return 'an error whose message is not a string'; }
-  return null;
-}
-
-/**
- * Describes what is wrong with a result for the method that asked for it.
- *
- * Each method promises one shape. Checking only that the outer array exists
- * left its members free to be anything, and the plain and --json paths then
- * disagreed about them: plain printed `undefined` for a text part with no text
- * while --json passed the same part through as a success.
- */
-function describeBadResult(result, method) {
-  if (!isPlainObject(result)) { return 'a result that is not an object'; }
-
-  if (method === 'initialize') {
-    if (typeof result.protocolVersion !== 'string') {
-      return 'an initialize result whose protocolVersion is not a string';
-    }
-    return null;
-  }
-
-  if (method === 'tools/list') {
-    if (!Array.isArray(result.tools)) { return 'a tools/list result without a tools array'; }
-    for (const tool of result.tools) {
-      if (!isPlainObject(tool)) { return 'a tools/list result holding an entry that is not an object'; }
-      if (typeof tool.name !== 'string' || tool.name === '') {
-        return 'a tools/list result holding a tool without a name';
-      }
-      if (tool.description !== undefined && typeof tool.description !== 'string') {
-        return 'a tools/list result holding a tool whose description is not a string';
-      }
-    }
-    return null;
-  }
-
-  if (!Array.isArray(result.content)) { return 'a tools/call result without a content array'; }
-  // isError decides the exit code, so a non-boolean here would make the
-  // difference between success and failure depend on JavaScript truthiness.
-  if (result.isError !== undefined && typeof result.isError !== 'boolean') {
-    return 'a tools/call result whose isError is not a boolean';
-  }
-  for (const part of result.content) {
-    if (!isPlainObject(part)) { return 'a tools/call result holding a content part that is not an object'; }
-    if (typeof part.type !== 'string' || part.type === '') {
-      return 'a tools/call result holding a content part without a type';
-    }
-    if (part.type === 'text' && typeof part.text !== 'string') {
-      return 'a tools/call result holding a text part whose text is not a string';
-    }
-  }
-  return null;
-}
-
-/**
- * Describes what is wrong with a reply, or returns null when it is usable.
- *
- * A reply that parsed and carries the right id is still not an answer. These
- * checks are the whole reason the exit codes mean anything: an error whose
- * message is a number would have gone straight into the frozen envelope as a
- * number, and a result missing its required array would have printed nothing
- * and exited 0. Every caller of this treats a description as unusable, so the
- * two output modes cannot classify the same reply differently.
- */
-function describeBadReply(reply, method) {
-  const hasResult = Object.prototype.hasOwnProperty.call(reply, 'result');
-  const hasError = Object.prototype.hasOwnProperty.call(reply, 'error');
-
-  // JSON-RPC allows exactly one. Both together means the server contradicted
-  // itself, and picking either one is guessing which half to believe.
-  if (hasResult === hasError) {
-    return hasResult
-      ? 'replied with both a result and an error'
-      : 'replied without a result or an error';
-  }
-
-  const bad = hasError
-    ? describeBadError(reply.error)
-    : describeBadResult(reply.result, method);
-  return bad ? `replied with ${bad}` : null;
-}
-
-/**
- * A failure before the request went out can never be UNKNOWN, and one after it
- * can never be TRANSPORT, because the browser may already have acted. USAGE and
- * TOOL_ERROR are decided explicitly and pass through untouched.
- */
-function normalizeExit(exitCode, requestWritten) {
-  if (exitCode === EXIT.USAGE || exitCode === EXIT.TOOL_ERROR) { return exitCode; }
-  return requestWritten ? EXIT.UNKNOWN : EXIT.TRANSPORT;
-}
-
-/**
- * SIGTERM, then SIGKILL if that is ignored, and wait for the child to go.
- *
- * Releasing the pipes is not optional cleanup. A descendant of the bridge can
- * hold the bridge's stdout open after the bridge itself has exited, and that
- * handle alone kept this process alive indefinitely with nothing left to read.
- */
-function terminate(child) {
-  if (!child) { return Promise.resolve(); }
-
-  const release = () => {
-    for (const stream of [child.stdin, child.stdout, child.stderr]) {
-      try { if (stream) { stream.destroy(); } } catch { /* already gone */ }
-    }
-    try { child.unref(); } catch { /* not refcounted */ }
-  };
-
-  if (child.exitCode !== null || child.signalCode !== null) {
-    release();
-    return Promise.resolve();
-  }
-
-  return new Promise((resolve) => {
-    const done = () => {
-      clearTimeout(escalate);
-      clearTimeout(giveUp);
-      release();
-      resolve();
-    };
-    const escalate = setTimeout(() => {
-      try { child.kill('SIGKILL'); } catch { /* already gone */ }
-    }, TERMINATE_GRACE_MS);
-    // Never hang a caller on a child that cannot be reaped at all.
-    const giveUp = setTimeout(done, TERMINATE_GRACE_MS * 2);
-    child.once('close', done);
-    try { child.stdin.destroy(); } catch { /* already closed */ }
-    try { child.kill('SIGTERM'); } catch { done(); }
-  });
-}
+// Deliberately not unref'd. An unref'd timer does not hold the event loop open,
+// and by the time a retry is waiting the child is dead and its pipes are
+// destroyed, so nothing else does either: Node exited cleanly with code 0
+// mid-backoff, reporting success for a call that never happened.
+const sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
 
 function parseArguments(argv) {
-  const options = { timeout: DEFAULT_TIMEOUT_SECONDS, json: false };
+  const options = { timeout: DEFAULT_TIMEOUT_SECONDS, retries: 0, json: false };
   const positional = [];
   // Scanning continues past the first mistake so that `--json` is still seen,
   // and a --json caller gets the error envelope rather than a bare exit code.
   let error = null;
   const note = (message) => { error = error || message; };
+
+  // Never swallow the next token when it is itself a flag: consuming `--json`
+  // as a value lost the very flag that decides how the error gets reported.
+  const valueFor = (flag, index) => {
+    const raw = argv[index + 1];
+    if (raw === undefined || raw.startsWith('-')) {
+      note(`${flag} wants a value, got ${raw === undefined ? 'nothing' : raw}`);
+      return null;
+    }
+    return raw;
+  };
 
   for (let i = 0; i < argv.length; i++) {
     const argument = argv[i];
@@ -273,20 +143,24 @@ function parseArguments(argv) {
     else if (argument === '-h' || argument === '--help') { options.help = true; }
     else if (argument === '-v' || argument === '--version') { options.version = true; }
     else if (argument === '--timeout') {
-      // Never swallow the next token when it is itself a flag: consuming
-      // `--json` as the timeout value lost the very flag that decides how this
-      // error gets reported.
-      const raw = argv[i + 1];
-      if (raw === undefined || raw.startsWith('-')) {
-        note(`--timeout wants a positive number of seconds, got ${raw === undefined ? 'nothing' : raw}`);
-        continue;
-      }
+      const raw = valueFor('--timeout', i);
+      if (raw === null) { continue; }
       i++;
       const value = Number(raw);
       if (!Number.isFinite(value) || value <= 0) {
         note(`--timeout wants a positive number of seconds, got ${raw}`);
       } else {
         options.timeout = value;
+      }
+    } else if (argument === '--retries') {
+      const raw = valueFor('--retries', i);
+      if (raw === null) { continue; }
+      i++;
+      const value = Number(raw);
+      if (!Number.isInteger(value) || value < 0) {
+        note(`--retries wants a whole number of attempts, got ${raw}`);
+      } else {
+        options.retries = value;
       }
     } else if (argument.startsWith('-')) {
       note(`unknown option ${argument}`);
@@ -297,197 +171,80 @@ function parseArguments(argv) {
   return { options, positional, error };
 }
 
-/** Resolves once the reply to `id` arrives, or rejects with a CicError. */
-function requestReply(child, id, timeoutSeconds) {
-  return new Promise((resolve, reject) => {
-    let buffer = '';
-    let settled = false;
+/** Decides what the command means, before anything is spawned. */
+function planRequest(positional) {
+  const [command, toolName, rawArguments, ...extra] = positional;
+  if (command !== 'list' && command !== 'call') {
+    throw new UsageError(`unknown command '${command}'. Expected 'list' or 'call'.`);
+  }
 
-    const finish = (fn, value) => {
-      if (settled) { return; }
-      settled = true;
-      clearTimeout(timer);
-      fn(value);
-    };
+  if (command === 'list') {
+    if (toolName !== undefined) {
+      throw new UsageError(`list takes no arguments, got '${toolName}'.`);
+    }
+    return { command, method: 'tools/list', params: {} };
+  }
 
-    const onLine = (line) => {
-      let message;
-      try { message = JSON.parse(line); } catch { return; }
-      // Valid JSON is not necessarily a message: `null`, a number and an array
-      // all parse, and dereferencing them threw an uncaught TypeError out of
-      // this stream handler. Anything that is not an object is not addressed
-      // to us, so it is log noise and gets skipped.
-      if (message === null || typeof message !== 'object' || Array.isArray(message)) { return; }
-      if (message.id !== id) { return; }
-      // Addressed to us, but not in an envelope the protocol defines. Trusting
-      // its result would mean reporting success for something unparsed.
-      if (message.jsonrpc !== '2.0') {
-        finish(reject, new CicError(EXIT.UNKNOWN,
-          `the bridge replied to request ${id} without a JSON-RPC 2.0 envelope, so the outcome is unknown.`));
-        return;
-      }
-      finish(resolve, message);
-    };
-
-    // A line-oriented reader that also flushes what is left when the stream
-    // ends: a reply split across chunks by a child that exits immediately
-    // afterwards would otherwise read as no reply at all.
-    const consume = (text, isFinal) => {
-      buffer += text;
-      let index;
-      while ((index = buffer.indexOf('\n')) !== -1) {
-        const line = buffer.slice(0, index).trim();
-        buffer = buffer.slice(index + 1);
-        if (line) { onLine(line); }
-      }
-      if (isFinal && buffer.trim()) { onLine(buffer.trim()); }
-    };
-
-    const timer = setTimeout(() => {
-      finish(reject, new CicError(EXIT.UNKNOWN,
-        `no reply within ${timeoutSeconds}s. Raise --timeout, or check that the Claude in Chrome extension is connected.`));
-    }, timeoutSeconds * 1000);
-
-    child.stdout.on('data', (chunk) => consume(String(chunk), false));
-    child.stdout.on('end', () => consume('', true));
-    child.on('exit', (code) => {
-      // Let the final stdout chunk land before calling this no reply.
-      setImmediate(() => finish(reject, new CicError(EXIT.UNKNOWN,
-        `the bridge exited (code ${code}) before a usable reply arrived.`)));
-    });
-    child.on('error', (error) => {
-      finish(reject, new CicError(EXIT.UNKNOWN, `bridge failed: ${error.message}`));
-    });
-  });
+  if (!toolName) { throw new UsageError('call wants a tool name.'); }
+  if (extra.length) {
+    throw new UsageError(
+      `call takes a tool name and optional JSON arguments, got ${extra.length} extra: '${extra.join("', '")}'.`);
+  }
+  let toolArguments;
+  try {
+    toolArguments = JSON.parse(rawArguments === undefined ? '{}' : rawArguments);
+  } catch (failure) {
+    throw new UsageError(`arguments are not valid JSON: ${failure.message}`);
+  }
+  if (toolArguments === null || typeof toolArguments !== 'object' || Array.isArray(toolArguments)) {
+    throw new UsageError('arguments must be a JSON object.');
+  }
+  return { command, method: 'tools/call', params: { name: toolName, arguments: toolArguments } };
 }
 
-async function main(ctx) {
+/**
+ * One attempt: open a session, make the call, close it. Returns the validated
+ * reply, or throws. The session is always closed, including on failure, so a
+ * retry never leaves a bridge behind.
+ */
+async function attempt(plan, options) {
+  const session = new BridgeSession({ timeoutSeconds: options.timeout });
+  session.clientVersion = VERSION;
+  try {
+    await session.open();
+    return await session.call(plan.method, plan.params);
+  } finally {
+    await session.close();
+  }
+}
+
+async function main() {
   const { options, positional, error } = parseArguments(process.argv.slice(2));
-  // Recorded before anything can fail, so the error path knows how to format.
-  ctx.json = options.json;
-  // Usage is decided entirely before spawning, so a malformed call can never
-  // race with a transport failure for the exit code.
-  if (error) { throw new CicError(EXIT.USAGE, error); }
+  if (error) { throw new UsageError(error); }
 
   if (options.version) { await writeOut(VERSION + '\n'); return EXIT.OK; }
   if (options.help || positional.length === 0) { await writeOut(USAGE + '\n'); return EXIT.OK; }
 
-  const [command, toolName, rawArguments, ...extra] = positional;
-  if (command !== 'list' && command !== 'call') {
-    throw new CicError(EXIT.USAGE, `unknown command '${command}'. Expected 'list' or 'call'.`);
-  }
+  const plan = planRequest(positional);
 
-  let method = 'tools/list';
-  let params = {};
-  if (command === 'list') {
-    if (toolName !== undefined) {
-      throw new CicError(EXIT.USAGE, `list takes no arguments, got '${toolName}'.`);
-    }
-  } else {
-    if (!toolName) { throw new CicError(EXIT.USAGE, 'call wants a tool name.'); }
-    if (extra.length) {
-      throw new CicError(EXIT.USAGE,
-        `call takes a tool name and optional JSON arguments, got ${extra.length} extra: '${extra.join("', '")}'.`);
-    }
-    let toolArguments;
+  let reply;
+  // Retries are limited to failures that never reached the browser. After
+  // dispatch the outcome is unknown, and repeating a click or a script is a
+  // second action, not a second look at the first one.
+  for (let tries = 0; ; tries++) {
     try {
-      toolArguments = JSON.parse(rawArguments === undefined ? '{}' : rawArguments);
+      reply = await attempt(plan, options);
+      break;
     } catch (failure) {
-      throw new CicError(EXIT.USAGE, `arguments are not valid JSON: ${failure.message}`);
+      const retryable = failure instanceof BridgeError && !failure.dispatched;
+      if (!retryable || tries >= options.retries) { throw failure; }
+      await sleep(Math.min(RETRY_BASE_MS * (2 ** tries), RETRY_MAX_MS));
     }
-    if (toolArguments === null || typeof toolArguments !== 'object' || Array.isArray(toolArguments)) {
-      throw new CicError(EXIT.USAGE, 'arguments must be a JSON object.');
-    }
-    method = 'tools/call';
-    params = { name: toolName, arguments: toolArguments };
-  }
-
-  const binary = process.env.CIC_CLAUDE_BIN || 'claude';
-  const binaryArguments = process.env.CIC_CLAUDE_ARGS
-    ? process.env.CIC_CLAUDE_ARGS.split(' ').filter(Boolean)
-    : ['--claude-in-chrome-mcp'];
-
-  try {
-    ctx.child = spawn(binary, binaryArguments, { stdio: ['pipe', 'pipe', 'inherit'] });
-  } catch (failure) {
-    throw new CicError(EXIT.TRANSPORT, `could not start ${binary}: ${failure.message}`);
-  }
-  const child = ctx.child;
-
-  const write1 = (object) => new Promise((resolve, reject) => {
-    child.stdin.write(JSON.stringify(object) + '\n', (failure) => {
-      if (failure) { reject(new CicError(EXIT.TRANSPORT, `could not reach ${binary}: ${failure.message}`)); }
-      else { resolve(); }
-    });
-  });
-
-  // A failed write only ever reports a broken pipe. The child's own error
-  // event carries the reason the pipe broke (`spawn ... ENOENT` for a missing
-  // binary), and the pending reply promise is what surfaces it, so on a write
-  // failure let that promise speak first.
-  const send = async (object, pending) => {
-    try {
-      await write1(object);
-    } catch (writeFailure) {
-      await pending;
-      throw writeFailure;
-    }
-  };
-
-  // 1. initialize, and wait for the response before anything else. cic.sh sent
-  //    all three messages in one burst, which the specification forbids.
-  const initializePromise = requestReply(child, 1, options.timeout);
-  // Whichever error wins the race below, the loser must still count as handled
-  // or Node kills the process on the late rejection with a stack trace.
-  initializePromise.catch(() => {});
-  await send({
-    jsonrpc: '2.0', id: 1, method: 'initialize',
-    params: {
-      protocolVersion: CLIENT_PROTOCOL, capabilities: {},
-      clientInfo: { name: 'cic', version: VERSION },
-    },
-  }, initializePromise);
-  const initialized = await initializePromise;
-
-  // The handshake reply gets the same scrutiny as a tool reply. Everything here
-  // is still pre-dispatch, so a malformed one is exit 3: nothing was sent to
-  // the browser and nothing can have happened in it.
-  const badInitialize = describeBadReply(initialized, 'initialize');
-  if (badInitialize) {
-    throw new CicError(EXIT.TRANSPORT, `the bridge ${badInitialize} while initializing.`);
-  }
-
-  if (initialized.error) {
-    throw new CicError(EXIT.TRANSPORT,
-      `the bridge refused the handshake: ${JSON.stringify(initialized.error)}`);
-  }
-  // Guaranteed a string by the check above.
-  const agreed = initialized.result.protocolVersion;
-  if (!SUPPORTED_PROTOCOLS.has(agreed)) {
-    throw new CicError(EXIT.TRANSPORT,
-      `the bridge answered with unsupported protocol version ${JSON.stringify(agreed)}.`);
-  }
-
-  // 2. Only now is the session initialized, so the request may go out.
-  const replyPromise = requestReply(child, 2, options.timeout);
-  replyPromise.catch(() => {});
-  await send({ jsonrpc: '2.0', method: 'notifications/initialized' }, replyPromise);
-  await send({ jsonrpc: '2.0', id: 2, method, params }, replyPromise);
-  // Everything from here is post-dispatch: the browser may have acted, so no
-  // failure below may report TRANSPORT.
-  ctx.requestWritten = true;
-
-  const reply = await replyPromise;
-
-  // Validate before reading anything out of it, so nothing malformed can reach
-  // the output or the frozen envelope.
-  const badReply = describeBadReply(reply, method);
-  if (badReply) {
-    throw new CicError(EXIT.UNKNOWN, `the bridge ${badReply}, so the outcome is unknown.`);
   }
 
   if (reply.error) {
-    // Guaranteed a string by describeBadReply, so the envelope keeps its shape.
+    // Guaranteed a string by the session's validation, so the envelope keeps
+    // its shape.
     const message = reply.error.message;
     if (options.json) { await writeOut(envelope(EXIT.TOOL_ERROR, message)); }
     else { await writeErr(`cic: ${JSON.stringify(reply.error)}\n`); }
@@ -509,7 +266,7 @@ async function main(ctx) {
 
   // One write rather than one per line: a page-text dump is a single large
   // string, and every await here is a chance to be interrupted.
-  const lines = command === 'list'
+  const lines = plan.command === 'list'
     ? (result.tools || []).map((tool) => `- ${tool.name} :: ${(tool.description || '').split('\n')[0].slice(0, 80)}`)
     : (result.content || []).map((part) => (part.type === 'text' ? part.text : `[${part.type || '?'}]`));
   if (lines.length) { await writeOut(lines.join('\n') + '\n'); }
@@ -519,22 +276,32 @@ async function main(ctx) {
   return result.isError ? EXIT.TOOL_ERROR : EXIT.OK;
 }
 
+/**
+ * A failure before the request went out can never be UNKNOWN, and one after it
+ * can never be TRANSPORT, because the browser may already have acted.
+ */
+function classify(failure) {
+  if (failure instanceof UsageError) { return EXIT.USAGE; }
+  if (failure instanceof BridgeError) { return failure.dispatched ? EXIT.UNKNOWN : EXIT.TRANSPORT; }
+  return EXIT.TRANSPORT;
+}
+
 (async () => {
-  const ctx = { json: false, child: null, requestWritten: false };
+  let asJson = false;
   try {
-    process.exitCode = await main(ctx);
+    // Parsed twice on the failure path only, so the error formatter knows
+    // whether --json was asked for even when parsing itself failed.
+    asJson = parseArguments(process.argv.slice(2)).options.json;
+    process.exitCode = await main();
   } catch (failure) {
-    const claimed = failure instanceof CicError ? failure.exitCode : EXIT.TRANSPORT;
-    const message = failure instanceof CicError
+    const exitCode = classify(failure);
+    const message = failure instanceof UsageError || failure instanceof BridgeError
       ? failure.message
       : `unexpected failure: ${failure && failure.message}`;
-    const exitCode = normalizeExit(claimed, ctx.requestWritten);
     try {
-      if (ctx.json) { await writeOut(envelope(exitCode, message)); }
+      if (asJson) { await writeOut(envelope(exitCode, message)); }
       else { await writeErr(`cic: ${message}\n`); }
     } catch { /* the caller closed the stream; the exit code still stands */ }
     process.exitCode = exitCode;
-  } finally {
-    await terminate(ctx.child);
   }
 })();

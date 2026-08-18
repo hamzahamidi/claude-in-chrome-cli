@@ -35,6 +35,14 @@ function check(label, actual, expected) {
   console.log(`${ok ? 'ok  ' : 'FAIL'}  ${label}${ok ? '' : `\n        expected ${JSON.stringify(expected)}\n        actual   ${JSON.stringify(actual)}`}`);
 }
 
+// Printed, never silent. A suite that quietly covers less on one platform is
+// how a support claim outruns its evidence.
+let skipped = 0;
+function skip(label, why) {
+  skipped++;
+  console.log(`skip  ${label} — ${why}`);
+}
+
 // ---- exit codes -----------------------------------------------------------
 
 check('list succeeds', run(['list']).status, 0);
@@ -177,8 +185,13 @@ check('call rejects a fourth argument',
 
 // ---- the child is reaped, not merely signalled -----------------------------
 
-// A child ignoring SIGTERM used to outlive the call, so a cron job calling cic
-// in a loop accumulated one stranded bridge per run.
+// The assertion is the same everywhere, but what it proves is not. On POSIX the
+// child installs a SIGTERM handler and ignores it, so a dead child proves the
+// client escalated to SIGKILL. On Windows a signal cannot be refused at all:
+// Node maps kill() to TerminateProcess, the handler never runs, and the same
+// assertion proves only that the client asked. Claiming the escalation on
+// Windows would be claiming a guarantee the OS does not make.
+const POSIX = process.platform !== 'win32';
 const pidFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'cic-pid-')), 'pid');
 run(['call', 'navigate', '{}'], {
   mode: 'ignore-sigterm',
@@ -191,7 +204,10 @@ try {
 } catch {
   stubAlive = false;
 }
-check('a child that ignores SIGTERM is killed rather than stranded', stubAlive, false);
+check(POSIX
+  ? 'a child that ignores SIGTERM is killed rather than stranded'
+  : 'the child is terminated (Windows cannot refuse a signal, so no escalation is proven)',
+stubAlive, false);
 
 // ---- a flag must never be eaten as another flag's value --------------------
 
@@ -247,48 +263,59 @@ check('--json says unknown for an unenveloped reply',
 // EPIPE arrives twice, through the write callback and as a stream error event.
 // Without a listener for the second, Node rethrew it and printed a stack trace
 // after the output had already been delivered.
-const piped = spawnSync('sh', ['-c',
-  `${JSON.stringify(process.execPath)} ${JSON.stringify(CIC)} call get_page_text '{}' | head -c 1`], {
-  encoding: 'utf8',
-  env: { ...process.env, CIC_CLAUDE_BIN: process.execPath, CIC_CLAUDE_ARGS: STUB, CIC_STUB_MODE: 'big' },
-});
-check('a reader closing early does not produce a stack trace',
-  /Unhandled|EPIPE/.test(piped.stderr), false);
+// Needs a POSIX shell to build the pipeline, and a reader that closes it early.
+if (POSIX) {
+  const piped = spawnSync('sh', ['-c',
+    `${JSON.stringify(process.execPath)} ${JSON.stringify(CIC)} call get_page_text '{}' | head -c 1`], {
+    encoding: 'utf8',
+    env: { ...process.env, CIC_CLAUDE_BIN: process.execPath, CIC_CLAUDE_ARGS: STUB, CIC_STUB_MODE: 'big' },
+  });
+  check('a reader closing early does not produce a stack trace',
+    /Unhandled|EPIPE/.test(piped.stderr), false);
+} else {
+  skip('a reader closing early does not produce a stack trace', 'needs a POSIX shell pipeline');
+}
 
 // ---- shutdown when something else holds the pipe --------------------------
 
 // A descendant of the bridge holding the bridge's stdout kept the client alive
 // indefinitely, because terminate() returned early for an already-exited child
-// and never released the pipes.
-const readyFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'cic-linger-')), 'ready');
-const startedAt = Date.now();
-const lingered = run(['call', 'get_page_text', '{}'], {
-  mode: 'linger',
-  env: { CIC_STUB_READY: readyFile },
-  timeoutSeconds: 10,
-});
-const lingerSeconds = (Date.now() - startedAt) / 1000;
-check('a bridge whose descendant holds stdout still lets the client exit', lingered.status, 0);
-check('and the client does not wait on that pipe to do it', lingerSeconds < 9, true);
+// and never released the pipes. The setup depends on a detached child
+// inheriting fd 1, which Windows does not reproduce, so this stays POSIX-only
+// rather than being weakened into something that passes everywhere.
+if (POSIX) {
+  const readyFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'cic-linger-')), 'ready');
+  const startedAt = Date.now();
+  const lingered = run(['call', 'get_page_text', '{}'], {
+    mode: 'linger',
+    env: { CIC_STUB_READY: readyFile },
+    timeoutSeconds: 10,
+  });
+  const lingerSeconds = (Date.now() - startedAt) / 1000;
+  check('a bridge whose descendant holds stdout still lets the client exit', lingered.status, 0);
+  check('and the client does not wait on that pipe to do it', lingerSeconds < 9, true);
 
-// Kill the process this test deliberately created. Signal 0 only asks whether a
-// pid exists, so the first version of this cleanup killed nothing and leaked an
-// immortal node process on every run.
-const alive = (pid) => {
-  try { process.kill(pid, 0); return true; } catch { return false; }
-};
-let holderPid = NaN;
-try { holderPid = Number(fs.readFileSync(readyFile, 'utf8').trim()); } catch { /* never started */ }
-check('the linger stub reported a usable pid', Number.isInteger(holderPid) && holderPid > 0, true);
-if (Number.isInteger(holderPid) && holderPid > 0) {
-  try { process.kill(holderPid, 'SIGKILL'); } catch { /* already gone */ }
-  // Reaping is not instant, so give it a moment before asserting.
-  for (let attempt = 0; attempt < 40 && alive(holderPid); attempt++) {
-    spawnSync(process.execPath, ['-e', 'setTimeout(() => {}, 25)']);
+  // Kill the process this test deliberately created. Signal 0 only asks whether
+  // a pid exists, so the first version of this cleanup killed nothing and
+  // leaked an immortal node process on every run.
+  const alive = (pid) => {
+    try { process.kill(pid, 0); return true; } catch { return false; }
+  };
+  let holderPid = NaN;
+  try { holderPid = Number(fs.readFileSync(readyFile, 'utf8').trim()); } catch { /* never started */ }
+  check('the linger stub reported a usable pid', Number.isInteger(holderPid) && holderPid > 0, true);
+  if (Number.isInteger(holderPid) && holderPid > 0) {
+    try { process.kill(holderPid, 'SIGKILL'); } catch { /* already gone */ }
+    // Reaping is not instant, so give it a moment before asserting.
+    for (let attempt = 0; attempt < 40 && alive(holderPid); attempt++) {
+      spawnSync(process.execPath, ['-e', 'setTimeout(() => {}, 25)']);
+    }
+    check('this test leaves nothing of its own behind', alive(holderPid), false);
   }
-  check('this test leaves nothing of its own behind', alive(holderPid), false);
+  fs.rmSync(path.dirname(readyFile), { recursive: true, force: true });
+} else {
+  skip('a descendant holding stdout does not hang shutdown', 'needs POSIX fd inheritance for a detached child');
 }
-fs.rmSync(path.dirname(readyFile), { recursive: true, force: true });
 
 // ---- a hostile handshake is exit 3, because nothing was dispatched ---------
 
@@ -368,5 +395,57 @@ for (const mode of CALL_MODES) {
     true);
 }
 
-console.log(failures ? `\n${failures} failed` : '\nall passed');
+// ---- retries, and only where retrying is safe ------------------------------
+
+// A handshake that fails twice then succeeds. Retrying is safe here precisely
+// because it failed before dispatch: the browser cannot have acted.
+const attemptsFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'cic-retry-')), 'attempts');
+const flaky = run(['call', 'navigate', '{}', '--retries', '3'], {
+  mode: 'flaky-handshake',
+  env: { CIC_STUB_ATTEMPTS: attemptsFile, CIC_STUB_FAIL_TIMES: '2' },
+  timeoutSeconds: 2,
+});
+check('--retries recovers a pre-dispatch failure', flaky.status, 0);
+check('and it stops as soon as one attempt succeeds',
+  Number(fs.readFileSync(attemptsFile, 'utf8')), 3);
+
+// Without --retries the same stub fails, so the recovery above is the flag
+// working rather than the stub being lenient.
+const noRetry = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'cic-retry0-')), 'attempts');
+check('the same failure without --retries is transport',
+  run(['call', 'navigate', '{}'], {
+    mode: 'flaky-handshake',
+    env: { CIC_STUB_ATTEMPTS: noRetry, CIC_STUB_FAIL_TIMES: '2' },
+    timeoutSeconds: 2,
+  }).status, 3);
+check('and it made exactly one attempt', Number(fs.readFileSync(noRetry, 'utf8')), 1);
+
+// Exhausting the budget still reports the honest code rather than success.
+const exhausted = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'cic-retryx-')), 'attempts');
+check('a budget too small still ends in transport',
+  run(['call', 'navigate', '{}', '--retries', '1'], {
+    mode: 'flaky-handshake',
+    env: { CIC_STUB_ATTEMPTS: exhausted, CIC_STUB_FAIL_TIMES: '5' },
+    timeoutSeconds: 2,
+  }).status, 3);
+check('having used its whole budget', Number(fs.readFileSync(exhausted, 'utf8')), 2);
+
+// The rule that matters: a post-dispatch unknown outcome is never retried,
+// because repeating a click is a second action, not a second look at the first.
+const postDispatch = run(['call', 'navigate', '{}', '--retries', '5'], {
+  mode: 'exit-early',
+  timeoutSeconds: 2,
+});
+check('an exit-2 outcome is not retried, whatever --retries says', postDispatch.status, 2);
+
+check('--retries rejects a negative count',
+  run(['call', 'navigate', '{}', '--retries', '-1']).status, 64);
+check('--retries rejects a fraction',
+  run(['call', 'navigate', '{}', '--retries', '1.5']).status, 64);
+check('--retries does not swallow a following flag',
+  run(['call', 'navigate', '{}', '--retries', '--json']).status, 64);
+
+console.log(failures
+  ? `\n${failures} failed${skipped ? `, ${skipped} skipped` : ''}`
+  : `\nall passed${skipped ? `, ${skipped} skipped` : ''}`);
 process.exit(failures ? 1 : 0);
