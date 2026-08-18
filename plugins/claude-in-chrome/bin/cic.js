@@ -118,6 +118,48 @@ const textOf = (result) => (result.content || [])
   .map((part) => part.text)
   .join('\n');
 
+const isPlainObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
+
+/**
+ * Describes what is wrong with a reply, or returns null when it is usable.
+ *
+ * A reply that parsed and carries the right id is still not an answer. The
+ * checks below are the whole reason the exit codes mean anything: an error
+ * whose message is a number would have gone straight into the frozen envelope
+ * as a number, and a result missing its required array would have printed
+ * nothing and exited 0. Post-dispatch, unusable is exit 2, never a guess.
+ */
+function describeBadReply(reply, method) {
+  const hasResult = Object.prototype.hasOwnProperty.call(reply, 'result');
+  const hasError = Object.prototype.hasOwnProperty.call(reply, 'error');
+
+  // JSON-RPC allows exactly one. Both together means the server contradicted
+  // itself, and picking either one is guessing which half to believe.
+  if (hasResult === hasError) {
+    return hasResult
+      ? 'replied with both a result and an error'
+      : 'replied without a result or an error';
+  }
+
+  if (hasError) {
+    if (!isPlainObject(reply.error)) { return 'replied with an error that is not an object'; }
+    if (typeof reply.error.code !== 'number') { return 'replied with an error whose code is not a number'; }
+    if (typeof reply.error.message !== 'string') { return 'replied with an error whose message is not a string'; }
+    return null;
+  }
+
+  if (!isPlainObject(reply.result)) { return 'replied with a result that is not an object'; }
+  // The two methods this client calls each require one array. An empty array
+  // is a real answer; a missing one means the reply was never filled in.
+  if (method === 'tools/list' && !Array.isArray(reply.result.tools)) {
+    return 'replied to tools/list without a tools array';
+  }
+  if (method === 'tools/call' && !Array.isArray(reply.result.content)) {
+    return 'replied to tools/call without a content array';
+  }
+  return null;
+}
+
 /**
  * A failure before the request went out can never be UNKNOWN, and one after it
  * can never be TRANSPORT, because the browser may already have acted. USAGE and
@@ -379,20 +421,22 @@ async function main(ctx) {
 
   const reply = await replyPromise;
 
+  // Validate before reading anything out of it, so nothing malformed can reach
+  // the output or the frozen envelope.
+  const badReply = describeBadReply(reply, method);
+  if (badReply) {
+    throw new CicError(EXIT.UNKNOWN, `the bridge ${badReply}, so the outcome is unknown.`);
+  }
+
   if (reply.error) {
-    const message = (reply.error && reply.error.message) || 'the tool reported an error';
+    // Guaranteed a string by describeBadReply, so the envelope keeps its shape.
+    const message = reply.error.message;
     if (options.json) { await writeOut(envelope(EXIT.TOOL_ERROR, message)); }
     else { await writeErr(`cic: ${JSON.stringify(reply.error)}\n`); }
     return EXIT.TOOL_ERROR;
   }
 
-  // A reply carrying neither result nor error agreed to nothing. Reporting
-  // success on it would be the shell version's bug in a new place.
   const result = reply.result;
-  if (!result || typeof result !== 'object' || Array.isArray(result)) {
-    throw new CicError(EXIT.UNKNOWN,
-      'the bridge replied without a result, so the outcome is unknown.');
-  }
 
   if (options.json) {
     // isError is the tool saying it failed, so --json owes the caller the

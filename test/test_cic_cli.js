@@ -214,6 +214,28 @@ check('a literal null reply does not crash the client', nullReply.status, 2);
 check('a literal null reply reports no usable reply, not a stack trace',
   /Unhandled|TypeError/.test(nullReply.stderr), false);
 
+// An error whose message is not a string used to go into the frozen envelope
+// verbatim, so a machine caller got `"message":42` from a contract that
+// promises a string.
+const numericMessage = run(['call', 'navigate', '{}'], { mode: 'numeric-error-message', timeoutSeconds: 2 });
+check('an error whose message is not a string is unknown, not a tool error', numericMessage.status, 2);
+const numericMessageJson = jsonLine(run(['call', 'navigate', '{}', '--json'], { mode: 'numeric-error-message', timeoutSeconds: 2 }));
+check('the envelope message stays a string when the bridge sends a number',
+  typeof (numericMessageJson && numericMessageJson.message), 'string');
+
+// JSON-RPC allows a result or an error, never both.
+check('a reply with both a result and an error is unknown',
+  run(['call', 'navigate', '{}'], { mode: 'result-and-error', timeoutSeconds: 2 }).status, 2);
+
+// A result missing the array its method requires printed nothing and exited 0,
+// which is indistinguishable from a genuinely empty page.
+check('a tools/call result with no content array is unknown, not empty success',
+  run(['call', 'navigate', '{}'], { mode: 'empty-result', timeoutSeconds: 2 }).status, 2);
+check('a tools/list result with no tools array is unknown, not empty success',
+  run(['list'], { mode: 'empty-result', timeoutSeconds: 2 }).status, 2);
+// An empty array is a real answer and must stay one.
+check('an empty content array is still a success', run(['call', 'navigate', '{}'], { mode: 'empty-content' }).status, 0);
+
 const noEnvelope = run(['call', 'navigate', '{}'], { mode: 'no-envelope', timeoutSeconds: 2 });
 check('a reply without a JSON-RPC 2.0 envelope is unknown, not success', noEnvelope.status, 2);
 const noEnvelopeJson = jsonLine(run(['call', 'navigate', '{}', '--json'], { mode: 'no-envelope', timeoutSeconds: 2 }));
@@ -248,9 +270,25 @@ const lingered = run(['call', 'get_page_text', '{}'], {
 const lingerSeconds = (Date.now() - startedAt) / 1000;
 check('a bridge whose descendant holds stdout still lets the client exit', lingered.status, 0);
 check('and the client does not wait on that pipe to do it', lingerSeconds < 9, true);
-try {
-  process.kill(Number(fs.readFileSync(path.join(path.dirname(readyFile), 'ready'), 'utf8')), 0);
-} catch { /* nothing to clean up */ }
+
+// Kill the process this test deliberately created. Signal 0 only asks whether a
+// pid exists, so the first version of this cleanup killed nothing and leaked an
+// immortal node process on every run.
+const alive = (pid) => {
+  try { process.kill(pid, 0); return true; } catch { return false; }
+};
+let holderPid = NaN;
+try { holderPid = Number(fs.readFileSync(readyFile, 'utf8').trim()); } catch { /* never started */ }
+check('the linger stub reported a usable pid', Number.isInteger(holderPid) && holderPid > 0, true);
+if (Number.isInteger(holderPid) && holderPid > 0) {
+  try { process.kill(holderPid, 'SIGKILL'); } catch { /* already gone */ }
+  // Reaping is not instant, so give it a moment before asserting.
+  for (let attempt = 0; attempt < 40 && alive(holderPid); attempt++) {
+    spawnSync(process.execPath, ['-e', 'setTimeout(() => {}, 25)']);
+  }
+  check('this test leaves nothing of its own behind', alive(holderPid), false);
+}
+fs.rmSync(path.dirname(readyFile), { recursive: true, force: true });
 
 console.log(failures ? `\n${failures} failed` : '\nall passed');
 process.exit(failures ? 1 : 0);

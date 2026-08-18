@@ -118,13 +118,55 @@ function replyTo(message) {
     return;
   }
 
+  // An error whose message is not a string. This went into the frozen envelope
+  // verbatim, so `message` came out as a number.
+  if (mode === 'numeric-error-message') {
+    send({ jsonrpc: '2.0', id, error: { code: -32000, message: 42 } });
+    return;
+  }
+
+  // Both halves at once, which JSON-RPC forbids: choosing either is guessing.
+  if (mode === 'result-and-error') {
+    send({
+      jsonrpc: '2.0', id,
+      result: { content: [{ type: 'text', text: 'succeeded' }] },
+      error: { code: -1, message: 'and also failed' },
+    });
+    return;
+  }
+
+  // A result with none of the arrays its method requires. This printed nothing
+  // and exited 0, which reads as an empty page rather than a broken reply.
+  if (mode === 'empty-result') {
+    send({ jsonrpc: '2.0', id, result: {} });
+    return;
+  }
+
+  // The array is there and empty, which is a real answer: a page with no text
+  // content must not be confused with a reply that never got filled in.
+  if (mode === 'empty-content') {
+    send({ jsonrpc: '2.0', id, result: { content: [] } });
+    return;
+  }
+
   // Replies, then exits, leaving a detached descendant holding its stdout. That
   // pipe alone used to keep the client alive forever.
   if (mode === 'linger') {
     const readyFile = process.env.CIC_STUB_READY;
     const { spawn, spawnSync } = require('child_process');
-    spawn(process.execPath, ['-e', "require('fs').writeFileSync(process.env.R,'up');setInterval(()=>{},1000)"],
-      { stdio: ['ignore', 1, 'ignore'], detached: true, env: { ...process.env, R: readyFile } }).unref();
+    // The descendant reports its own pid, which proves it is running and gives
+    // the test something to kill. It also gives up on its own: a detached
+    // process that only a passing test cleans up is a process that leaks every
+    // time the test does not reach its cleanup, which is how three immortal
+    // node processes ended up on the machine this was written on.
+    const holder = "require('fs').writeFileSync(process.env.R, String(process.pid));"
+      + 'setTimeout(() => process.exit(0), 20000).unref();'
+      + 'setInterval(() => {}, 1000);';
+    spawn(process.execPath, ['-e', holder], {
+      stdio: ['ignore', 1, 'ignore'],
+      detached: true,
+      env: { ...process.env, R: readyFile },
+    }).unref();
     // Do not exit before the descendant is actually holding the pipe.
     while (!require('fs').existsSync(readyFile)) { spawnSync(process.execPath, ['-e', '']); }
     send(callResult(id));
