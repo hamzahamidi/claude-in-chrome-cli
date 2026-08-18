@@ -30,10 +30,12 @@ So a navigate reporting success while the page is actually unauthenticated is st
 ## Reaching the bridge
 
 - Inside a Claude Code session with this plugin installed and the Claude in Chrome extension connected, the `claude-in-chrome` MCP tools appear directly (`navigate`, `read_page`, `find`, `computer`, `get_page_text`, and the rest). Use them.
-- From a shell, a script, a cron job, or an agent that cannot hold an MCP connection: use `${CLAUDE_PLUGIN_ROOT}/cic.sh`. It speaks the same MCP handshake over stdio to `claude --claude-in-chrome-mcp`.
-  - `cic.sh --list` lists the available tools
-  - `cic.sh <tool_name> '<json-args>' [wait_secs]` calls one
-  - Each call is its own MCP session, so its tab group starts empty. Create a tab with `cic.sh tabs_create_mcp '{}'` and pass the id it prints to every later call, or the tool answers `No tab available`. Inside a Claude Code session the MCP tools keep one group, so this does not apply there.
+- From a shell, a script, a cron job, or an agent that cannot hold an MCP connection: use `node ${CLAUDE_PLUGIN_ROOT}/bin/cic.js`, or plain `cic` where the npm package is installed globally. It speaks the same MCP handshake over stdio to `claude --claude-in-chrome-mcp`.
+  - `cic list` lists the available tools
+  - `cic call <tool_name> '<json-args>'` calls one, with `--timeout <secs>` as a ceiling (default 30) and `--json` for the raw result object
+  - **Check the exit code; do not read the text to decide whether it worked.** 0 succeeded, 1 the tool itself reported an error, 2 the request went out and no usable reply came back so the outcome is unknown, 3 it failed before the request was sent so the browser cannot have acted, 64 a usage or JSON error. Only 3 is safe to retry blindly: after a 2, a click or a script may already have run.
+  - Each call is its own MCP session, so its tab group starts empty. Create a tab with `cic call tabs_create_mcp '{}'` and pass the id it prints to every later call, or the tool answers `No tab available`. Inside a Claude Code session the MCP tools keep one group, so this does not apply there.
+  - The shell version, `cic.sh`, was removed in 0.4.0. It exited 0 even on failure, so anything still calling it is reading success out of a broken pipeline.
 
 Never enter the user's credentials to force a session. Ask them to complete SSO in that Chrome window instead.
 

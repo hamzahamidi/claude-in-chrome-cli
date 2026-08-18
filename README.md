@@ -5,15 +5,15 @@
 [![Release](https://img.shields.io/github/v/release/hamzahamidi/claude-in-chrome-cli)](https://github.com/hamzahamidi/claude-in-chrome-cli/releases)
 [![License: MIT](https://img.shields.io/github/license/hamzahamidi/claude-in-chrome-cli)](LICENSE)
 
-Use the **Claude in Chrome** extension tools natively in Claude Code, or call them from your shell with `cic.sh`. Both connect through the same MCP server.
+Use the **Claude in Chrome** extension tools natively in Claude Code, or call them from your shell with `cic`. Both connect through the same MCP server.
 
-![cic.sh listing the tools the Claude in Chrome extension exposes](docs/cic-demo.png)
+![Listing the tools the Claude in Chrome extension exposes](docs/cic-demo.png)
 
 ## Why
 
 Claude Code ships a stdio MCP server, `claude --claude-in-chrome-mcp`, that bridges to the Claude in Chrome extension. Through it you can drive your **real, logged-in** Chrome: navigate, read the page, click, type, run JavaScript, read the console and network.
 
-Normally you reach those tools from inside a Claude session. Sometimes you just want one from a script or a terminal: a quick navigation, a page-text dump, a one-off step in a shell pipeline. `cic.sh` does that. It speaks the MCP handshake over stdio, calls one tool, prints the result, and exits.
+Normally you reach those tools from inside a Claude session. Sometimes you just want one from a script or a terminal: a quick navigation, a page-text dump, a one-off step in a shell pipeline. `cic` does that. It speaks the MCP handshake over stdio, calls one tool, prints the result, and exits with a code that means something.
 
 The plugin is a second front door. Install it to make `navigate`, `read_page`, `find`, `computer`, `get_page_text`, and the rest of the extension tools available natively in new Claude Code sessions.
 
@@ -25,8 +25,7 @@ Where this is going, release by release: see the [roadmap](ROADMAP.md).
 
 - The **Claude Code CLI** (`claude`) on your PATH.
 - The **Claude in Chrome** extension installed and connected to a running Chrome for the browser-driving tools. `list_open_tabs` does not need it.
-- `python3` (parses the JSON-RPC reply; `cic.sh` only).
-- **Node.js 22 or later**, for the `chrome-tabs` server behind `list_open_tabs`.
+- **Node.js 22 or later**. Nothing else: no runtime dependencies, no `python3`.
 
 ## Install
 
@@ -37,50 +36,93 @@ Where this is going, release by release: see the [roadmap](ROADMAP.md).
 /plugin install claude-in-chrome@claude-in-chrome-cli
 ```
 
-New Claude Code sessions get all the extension tools natively, plus a skill ([`using-claude-in-chrome`](plugins/claude-in-chrome/skills/using-claude-in-chrome/SKILL.md)) that teaches the agent when your real session is the one that matters, which browser tool to reach for when it is not, and how to avoid the common traps.
+New Claude Code sessions get all the extension tools natively, plus a skill ([`using-claude-in-chrome`](plugins/claude-in-chrome/skills/using-claude-in-chrome/SKILL.md)) that teaches the agent when your real session is the one that matters, which browser tool to reach for when it is not, and how to avoid the common traps. The plugin also bundles the CLI, reachable as `node ${CLAUDE_PLUGIN_ROOT}/bin/cic.js`.
 
-### As a shell script
+### As a command line tool
 
 ```sh
-curl -O https://raw.githubusercontent.com/hamzahamidi/claude-in-chrome-cli/main/cic.sh
-chmod +x cic.sh
+npm install -g claude-in-chrome-cli
 ```
+
+That puts `cic` on your PATH.
 
 ## Usage
 
 ```sh
-./cic.sh --list                                  # list available tools
-./cic.sh <tool_name> '<json-args>' [wait_secs]   # call a tool (default wait: 8s)
+cic list                      # list available tools
+cic call <tool> [json-args]   # call a tool, arguments default to {}
 ```
 
-`wait_secs` is how long to wait for the browser to answer before the connection closes. Slow pages or heavy actions need a larger value.
+| Option | What it does |
+| --- | --- |
+| `--timeout <secs>` | Ceiling on how long to wait for the reply. Default 30. |
+| `--json` | Print the raw result object, or one error object, on one line |
+| `-h`, `--help` | Usage |
+| `-v`, `--version` | Print the version |
+
+`--timeout` is a ceiling, not a wait: `cic` returns the moment the reply lands, so a fast call costs what the browser costs and nothing more.
+
+Exit codes are a contract, frozen from 0.4.0 onward:
+
+| Code | Meaning |
+| --- | --- |
+| `0` | Success |
+| `1` | The tool reported an error (a JSON-RPC error, or `isError: true`) |
+| `2` | Outcome unknown: the request was sent and no usable reply came back |
+| `3` | Failed before the request was sent, so the browser cannot have acted |
+| `64` | Usage error, or invalid arguments JSON |
+
+Only exit 3 is safe to retry automatically. Exit 2 means the click, submit or script may already have run.
+
+### Moving from `cic.sh`
+
+The shell script is gone as of 0.4.0. It exited 0 on tool errors, so pipelines carried on after a failure, and its `sleep`-based wait was a floor as well as a ceiling. Both are fixed in the Node client rather than patched in shell. The old script stays fetchable from the `v0.2.x` and `v0.3.x` tags.
+
+| Then | Now |
+| --- | --- |
+| `./cic.sh --list` | `cic list` |
+| `./cic.sh navigate '{"url":"..."}'` | `cic call navigate '{"url":"..."}'` |
+| `./cic.sh get_page_text '{}' 5` | `cic call get_page_text '{}' --timeout 5` |
+| `${CLAUDE_PLUGIN_ROOT}/cic.sh` | `node ${CLAUDE_PLUGIN_ROOT}/bin/cic.js` |
+| Third positional argument was the wait | `--timeout`, and it is a ceiling |
+| Errors printed, exit 0 | Errors exit 1, 2 or 3, per the table above |
 
 ## Examples
 
 ```sh
 # See what tools the extension exposes
-./cic.sh --list
+cic list
 
 # Make a tab of your own. It prints "Created new tab. Tab ID: 2099038679"
-./cic.sh tabs_create_mcp '{}'
+cic call tabs_create_mcp '{}'
 
 # Then pass that id to every tool that acts on a page
-./cic.sh navigate '{"url":"https://example.com","tabId":2099038679}'
-./cic.sh get_page_text '{"tabId":2099038679}' 5
-./cic.sh computer '{"action":"screenshot","tabId":2099038679}'
-./cic.sh javascript_tool '{"action":"javascript_exec","text":"document.title","tabId":2099038679}'
+cic call navigate '{"url":"https://example.com","tabId":2099038679}'
+cic call get_page_text '{"tabId":2099038679}'
+cic call computer '{"action":"screenshot","tabId":2099038679}'
+cic call javascript_tool '{"action":"javascript_exec","text":"document.title","tabId":2099038679}'
 
 # Close it when you are done
-./cic.sh tabs_close_mcp '{"tabId":2099038679}'
+cic call tabs_close_mcp '{"tabId":2099038679}'
 ```
 
-`tabId` is required here. Each `cic.sh` call is its own MCP session, so the session starts with an empty tab group and a tool that acts on a page answers `No tab available` without one. `--list` and `tabs_context_mcp` are the exceptions, since neither touches a page.
+Because the exit codes mean something, a sequence can stop when a step fails:
+
+```sh
+set -e
+TAB=$(cic call tabs_create_mcp '{}' | grep -o '[0-9]\{6,\}')
+cic call navigate "{\"url\":\"https://example.com\",\"tabId\":$TAB}"
+cic call get_page_text "{\"tabId\":$TAB}"
+cic call tabs_close_mcp "{\"tabId\":$TAB}"
+```
+
+`tabId` is required here. Each `cic` call is its own MCP session, so the session starts with an empty tab group and a tool that acts on a page answers `No tab available` without one. `list` and `tabs_context_mcp` are the exceptions, since neither touches a page.
 
 Never pass the id of a tab you are working in. `tabs_context_mcp` lists every tab the extension can see, including yours.
 
 ## Tools
 
-The exact set depends on your extension version. Run `./cic.sh --list` for the live list. Common ones:
+The exact set depends on your extension version. Run `cic list` for the live list. Common ones:
 
 | Tool | What it does |
 | --- | --- |
@@ -109,24 +151,24 @@ It takes an optional `profile` to narrow to one Chrome profile, and `include_url
 
 The server scans every recognized `Default` and `Profile *` directory for Chrome and Chromium, not just the profile the bridge happens to be using. Profiles whose session storage is encrypted or in an unsupported format are reported, but their tabs cannot be listed. If the newest initial snapshot never completed, the reader falls back to an older trustworthy file; if a completed snapshot only lost later incremental updates, it returns the recovered tabs with an incomplete warning. This is a best-effort reader of Chromium's undocumented SNSS format: it cannot identify the focused tab, and uncommon history-pruning events can leave a tab's reported page stale.
 
-`list_open_tabs` is read only, needs nothing running, and is the answer whenever the question is "what is open" rather than "drive this page". It is not available through `cic.sh`, which talks to the extension bridge instead.
+`list_open_tabs` is read only, needs nothing running, and is the answer whenever the question is "what is open" rather than "drive this page". It is not available through `cic`, which talks to the extension bridge instead.
 
 ## How it works
 
-An MCP stdio server reads newline-delimited JSON-RPC on stdin and writes responses on stdout. `cic.sh` sends three messages, then sleeps to let the reply arrive:
+An MCP stdio server reads newline-delimited JSON-RPC on stdin and writes responses on stdout. `cic` spawns `claude --claude-in-chrome-mcp` and negotiates in order, as the specification requires:
 
-1. `initialize` (the MCP handshake).
+1. `initialize`, then **wait** for the response and check the agreed protocol version.
 2. `notifications/initialized`.
 3. `tools/call` (or `tools/list`) with your tool name and arguments, as request id `2`.
 
-It pipes them into `claude --claude-in-chrome-mcp` and reads stdout back. A short `python3` filter picks the reply with id `2` and prints its text content.
+It then reads the child's stdout line by line and returns the moment the reply with id `2` lands, so `--timeout` is only a ceiling. The child's stderr passes straight through, which is how a missing binary, a disconnected extension and an auth failure stay distinguishable instead of collapsing into one "no reply" message.
 
 Each call is its own stdio session, so nothing persists in the CLI between calls. The **browser** state does persist: navigate in one call, read the page in the next.
 
 ## Notes and limits
 
 - It drives your real, logged-in browser. Treat it like handing a script your keyboard.
-- No streaming: you get the result after `wait_secs`. Raise it for slow actions.
+- No streaming: you get the whole result at once, as soon as it arrives. Raise `--timeout` for slow actions.
 - One tool per invocation. For sequences, run several calls or use `browser_batch`.
 - **The tab group is the boundary.** `tabs_context_mcp` lists the tabs in the extension's group and nothing else. No tool pulls another one in: there is no move, no "all windows" flag, and `select_browser` picks a browser rather than a tab. Which window a tab sits in makes no difference. To act on a page you already have open, re-open its URL in a group tab, or add your tab to the group from Chrome's own tab context menu. To merely *list* what you have open, call `list_open_tabs`: it uses the separate `chrome-tabs` server and needs no port, group or extension connection, subject to the readable-profile limitations above.
 - **No DevTools protocol.** Navigation, reading and interaction only, so no performance traces, and `navigate` cannot load a `chrome://` URL (it prefixes the scheme).

@@ -1,0 +1,38 @@
+{
+  "name": "claude-in-chrome-cli",
+  "version": "0.4.0",
+  "description": "Call Claude in Chrome MCP tools from the shell. Drives your real, logged-in Chrome from scripts, cron jobs, and agents that cannot hold an MCP connection.",
+  "bin": {
+    "cic": "plugins/claude-in-chrome/bin/cic.js"
+  },
+  "files": [
+    "plugins/claude-in-chrome/bin/cic.js"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node test/test_tabs_parser.js && sh test/test_tabs_mcp.sh && node test/test_cic_cli.js",
+    "test:install": "sh test/test_plugin_install.sh"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hamzahamidi/claude-in-chrome-cli.git"
+  },
+  "homepage": "https://github.com/hamzahamidi/claude-in-chrome-cli",
+  "bugs": {
+    "url": "https://github.com/hamzahamidi/claude-in-chrome-cli/issues"
+  },
+  "author": {
+    "name": "Hamza Hamidi"
+  },
+  "license": "MIT",
+  "keywords": [
+    "chrome",
+    "browser",
+    "automation",
+    "claude-in-chrome",
+    "mcp",
+    "cli"
+  ]
+}

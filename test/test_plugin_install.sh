@@ -57,7 +57,7 @@ fi
 EXPECTED="./.claude-plugin/plugin.json
 ./.mcp.json
 ./LICENSE
-./cic.sh
+./bin/cic.js
 ./skills/using-claude-in-chrome/SKILL.md
 ./tabs_mcp.js"
 ACTUAL="(cache directory missing)"
@@ -107,6 +107,30 @@ process.exit(
   check "the extension bridge is still registered as claude --claude-in-chrome-mcp" 0
 else
   check "the extension bridge is still registered as claude --claude-in-chrome-mcp" 1
+fi
+
+# Installation path 1, the plugin: the bundled CLI runs from the installed
+# cache. cic.sh was the plugin's shell entry point until 0.4.0 deleted it, so
+# this asserts the replacement actually shipped and starts.
+if [ -f "$CACHE_DIR/bin/cic.js" ] && [ "$(node "$CACHE_DIR/bin/cic.js" --version)" = "$VERSION" ]; then
+  check "the plugin's bundled cic runs from the installed cache" 0
+else
+  check "the plugin's bundled cic runs from the installed cache" 1
+fi
+
+# Installation path 2, npm: the published tarball carries the bin, and the bin
+# npm would link runs. `npm pack` builds exactly what `npm publish` would.
+PACK_DIR="$FAKE_HOME/pack"
+mkdir -p "$PACK_DIR"
+BIN_PATH=$(node -p "require('$REPO/package.json').bin.cic")
+if (cd "$REPO" && npm pack --pack-destination "$PACK_DIR" >/dev/null 2>&1) &&
+  TARBALL=$(find "$PACK_DIR" -name '*.tgz' | head -1) && [ -n "$TARBALL" ] &&
+  tar -xzf "$TARBALL" -C "$PACK_DIR" &&
+  [ -f "$PACK_DIR/package/$BIN_PATH" ] &&
+  [ "$(node "$PACK_DIR/package/$BIN_PATH" --version)" = "$VERSION" ]; then
+  check "the npm tarball carries a working cic bin" 0
+else
+  check "the npm tarball carries a working cic bin" 1
 fi
 
 if [ "$fails" -eq 0 ]; then
