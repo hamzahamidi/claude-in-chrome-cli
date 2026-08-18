@@ -1,7 +1,7 @@
 # claude-in-chrome-cli (`cic`)
 
-[![Claude Code plugin](https://img.shields.io/badge/Claude%20Code-plugin-da7756)](https://www.claudepluginhub.com/plugins/hamzahamidi-claude-in-chrome)
-[![Listed on ClaudePluginHub](https://www.claudepluginhub.com/badge/hamzahamidi-claude-in-chrome)](https://www.claudepluginhub.com/plugins/hamzahamidi-claude-in-chrome)
+[![Claude Code plugin](https://img.shields.io/badge/Claude%20Code-plugin-da7756)](https://www.claudepluginhub.com/plugins/hamzahamidi-claude-in-chrome-plugins-claude-in-chrome)
+[![Listed on ClaudePluginHub](https://www.claudepluginhub.com/badge/hamzahamidi-claude-in-chrome-plugins-claude-in-chrome)](https://www.claudepluginhub.com/plugins/hamzahamidi-claude-in-chrome-plugins-claude-in-chrome)
 [![npm](https://img.shields.io/npm/v/claude-in-chrome-cli)](https://www.npmjs.com/package/claude-in-chrome-cli)
 [![Release](https://img.shields.io/github/v/release/hamzahamidi/claude-in-chrome-cli)](https://github.com/hamzahamidi/claude-in-chrome-cli/releases)
 [![codecov](https://codecov.io/github/hamzahamidi/claude-in-chrome-cli/graph/badge.svg)](https://codecov.io/github/hamzahamidi/claude-in-chrome-cli)
