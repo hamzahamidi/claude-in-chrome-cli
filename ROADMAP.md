@@ -62,6 +62,23 @@ Non-goals: no friendly verbs, no retries, no persistence. This is the biggest re
 
 Risk: deleting `cic.sh` breaks anyone who curled it. Accepted, versioned, and documented in the migration section.
 
+## v0.4.1: measure, harden, automate
+
+Theme: know what the tests actually cover, close the validation gaps 0.4.0 shipped with, and stop publishing by hand.
+
+The order matters and is deliberate. Coverage comes first so the hardening has a number to move rather than a claim. Correctness comes before publishing automation, so the first automated publish ships something already believed correct.
+
+- **Coverage, measured before anything is changed.** `c8` writes `coverage/lcov.info` from the offline suites, which follow both programs into their child processes through `NODE_V8_COVERAGE`. Codecov receives it over GitHub OIDC with `id-token: write`, so there is no long-lived token in the repository. No threshold is invented: the baseline is recorded first, and a non-regression floor is set from it afterwards. The README badge is added only once an upload has actually landed, since a badge is a claim about a pipeline that works.
+- **The validation gaps 0.4.0 listed as known.** The initialize response gets the same result-or-error validator as a tool reply, and a malformed one exits 3 without dispatching, because nothing has reached the browser yet. Error `code` is checked as an integer rather than any number, `isError` as a boolean, and the members of `content` and `tools` for the shape they claim. Plain and `--json` output must classify the same reply identically: a difference between them is a bug in the contract, not a formatting choice. Hostile-server cases cover each one.
+- **Publishing, automated but not unattended.** `publish-npm.yml` fires on a `v*` tag, verifies the tag matches `package.json` exactly, runs the suites and `npm pack --dry-run`, then publishes through npm trusted publishing: GitHub OIDC, no `NPM_TOKEN`, provenance attached automatically. It runs in an `npm` GitHub Environment with manual approval, so a tag alone cannot ship. Needs Node 22.14 or later and npm 11.5.1 or later.
+- Release as 0.4.1 in that order: push the tag, let npm publishing finish, and only then publish the GitHub release, so the install command in the release notes works the moment anyone reads it.
+
+Non-goals: no new tools, no friendly verbs, no persistence. Nothing here changes what `cic` does when the bridge behaves.
+
+⚠️ **npm trusted publishing cannot perform a package's first publish.** A trusted publisher cannot be configured for a package that does not exist, and there is no token in this repository, so `claude-in-chrome-cli` has to be published once by hand before the workflow can take over from 0.4.1 onward.
+
+Risk: Codecov's OIDC support has a reported failure mode where the CLI ignores the credential, falls back to tokenless and then fails a rate limit. The upload step is therefore allowed to fail loudly rather than carrying `continue-on-error`, and it is skipped on fork pull requests, which are issued no `id-token` at all.
+
 ## v0.5.0: Windows, and friendly verbs
 
 Theme: the platform claim becomes real, and the common path stops requiring hand-written JSON.

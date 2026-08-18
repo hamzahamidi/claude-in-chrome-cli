@@ -5,22 +5,30 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Codecov authenticates with a short-lived OIDC token rather than a stored
+      # secret, which needs this. Nothing else in the job uses it.
+      id-token: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - name: install dev dependencies
+        run: npm ci
       - name: install the claude CLI, for the plugin install test
         run: npm install -g @anthropic-ai/claude-code
-      - name: chrome-tabs SNSS parser
-        run: node test/test_tabs_parser.js
-      - name: chrome-tabs MCP handshake
-        run: sh test/test_tabs_mcp.sh
-      - name: cic exit-code contract and handshake ordering
-        run: node test/test_cic_cli.js
+      # The offline suites run once, under coverage: the tests drive both
+      # programs as child processes and c8 follows them through NODE_V8_COVERAGE.
+      - name: offline suites, with coverage
+        run: npm run test:coverage
       - name: every version constant matches plugin.json
         run: |
           plugin_version=$(node -p "require('./plugins/claude-in-chrome/.claude-plugin/plugin.json').version")
@@ -36,3 +44,15 @@ jobs:
           test "$plugin_version" = "$cli_version"
       - name: both install paths carry a working cic
         run: sh test/test_plugin_install.sh
+      # A fork pull request is issued no id-token, and the action skips OIDC for
+      # one, so uploading from a fork could only fail. Skipping it there is what
+      # lets the upload below be allowed to fail loudly everywhere else.
+      - name: upload coverage to Codecov
+        if: github.event.pull_request.head.repo.full_name == github.repository || github.event_name == 'push'
+        uses: codecov/codecov-action@v7
+        with:
+          use_oidc: true
+          files: ./coverage/lcov.info
+          # Never soften this. An upload step that cannot fail reports success
+          # while every upload is rejected, and nobody notices for weeks.
+          fail_ci_if_error: true

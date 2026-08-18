@@ -13,7 +13,20 @@
   },
   "scripts": {
     "test": "node test/test_tabs_parser.js && sh test/test_tabs_mcp.sh && node test/test_cic_cli.js",
-    "test:install": "sh test/test_plugin_install.sh"
+    "test:install": "sh test/test_plugin_install.sh",
+    "test:coverage": "c8 npm test"
+  },
+  "c8": {
+    "//": "The tests drive both programs as child processes, which c8 follows via NODE_V8_COVERAGE. all:true counts files the suite never loads rather than hiding them.",
+    "include": [
+      "plugins/claude-in-chrome/**/*.js"
+    ],
+    "all": true,
+    "reporter": [
+      "text-summary",
+      "lcov"
+    ],
+    "report-dir": "coverage"
   },
   "repository": {
     "type": "git",
@@ -34,5 +47,8 @@
     "claude-in-chrome",
     "mcp",
     "cli"
-  ]
+  ],
+  "devDependencies": {
+    "c8": "^12.0.0"
+  }
 }
