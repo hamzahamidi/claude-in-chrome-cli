@@ -13,16 +13,22 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - name: install the claude CLI, for the plugin install test
+        run: npm install -g @anthropic-ai/claude-code
       - name: cic.sh request-side JSON
         run: sh test/test_request_json.sh
+      - name: cic.sh stays in sync with its plugin copy
+        run: sh test/test_cic_sync.sh
       - name: chrome-tabs SNSS parser
         run: node test/test_tabs_parser.js
       - name: chrome-tabs MCP handshake
         run: sh test/test_tabs_mcp.sh
       - name: server version matches plugin.json
         run: |
-          plugin_version=$(node -p "require('./.claude-plugin/plugin.json').version")
-          server_version=$(node -p "require('./tabs_mcp.js').SERVER_VERSION")
+          plugin_version=$(node -p "require('./plugins/claude-in-chrome/.claude-plugin/plugin.json').version")
+          server_version=$(node -p "require('./plugins/claude-in-chrome/tabs_mcp.js').SERVER_VERSION")
           echo "plugin.json: $plugin_version"
           echo "tabs_mcp.js: $server_version"
           test "$plugin_version" = "$server_version"
+      - name: plugin installs with only its runtime files in the cache
+        run: sh test/test_plugin_install.sh

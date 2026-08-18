@@ -7,7 +7,7 @@
   "plugins": [
     {
       "name": "claude-in-chrome",
-      "source": "./",
+      "source": "./plugins/claude-in-chrome",
       "description": "Drive your real, logged-in Chrome from Claude Code via the Claude in Chrome extension.",
       "category": "productivity"
     }
