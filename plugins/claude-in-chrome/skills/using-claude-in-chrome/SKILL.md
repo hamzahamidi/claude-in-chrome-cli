@@ -30,10 +30,12 @@ So a navigate reporting success while the page is actually unauthenticated is st
 ## Reaching the bridge
 
 - Inside a Claude Code session with this plugin installed and the Claude in Chrome extension connected, the `claude-in-chrome` MCP tools appear directly (`navigate`, `read_page`, `find`, `computer`, `get_page_text`, and the rest). Use them.
-- From a shell, a script, a cron job, or an agent that cannot hold an MCP connection: use `${CLAUDE_PLUGIN_ROOT}/cic.sh`. It speaks the same MCP handshake over stdio to `claude --claude-in-chrome-mcp`.
-  - `cic.sh --list` lists the available tools
-  - `cic.sh <tool_name> '<json-args>' [wait_secs]` calls one
-  - Each call is its own MCP session, so its tab group starts empty. Create a tab with `cic.sh tabs_create_mcp '{}'` and pass the id it prints to every later call, or the tool answers `No tab available`. Inside a Claude Code session the MCP tools keep one group, so this does not apply there.
+- From a shell, a script, a cron job, or an agent that cannot hold an MCP connection: use `node ${CLAUDE_PLUGIN_ROOT}/bin/cic.js`, or plain `cic` where the npm package is installed globally. It speaks the same MCP handshake over stdio to `claude --claude-in-chrome-mcp`.
+  - `cic list` lists the available tools
+  - `cic call <tool_name> '<json-args>'` calls one, with `--timeout <secs>` as a ceiling (default 30) and `--json` for the raw result object
+  - **Check the exit code; do not read the text to decide whether it worked.** 0 succeeded, 1 the tool itself reported an error, 2 the request went out and no usable reply came back so the outcome is unknown, 3 it failed before the request was sent so the browser cannot have acted, 64 a usage or JSON error. Only 3 is safe to retry blindly: after a 2, a click or a script may already have run.
+  - Each call is its own MCP session, so its tab group starts empty. Create a tab with `cic call tabs_create_mcp '{}'` and pass the id it prints to every later call, or the tool answers `No tab available`. Inside a Claude Code session the MCP tools keep one group, so this does not apply there.
+  - The shell version, `cic.sh`, was removed in 0.4.0. It exited 0 even on failure, so anything still calling it is reading success out of a broken pipeline.
 
 Never enter the user's credentials to force a session. Ask them to complete SSO in that Chrome window instead.
 
@@ -44,7 +46,7 @@ Never enter the user's credentials to force a session. Ask them to complete SSO 
 - **To reach a page the user already has open, re-open it.** `tabs_create_mcp` then `navigate` to the same URL gets the same profile and the same cookies at no cost to the user. Anything you would reload anyway, a performance measurement for instance, never needs their original tab.
 - **The bridge cannot open `chrome://` URLs.** `navigate` prefixes the scheme and lands on `https://chrome://…`. Ask the user to open those pages themselves.
 - **Navigate, then verify in a separate call.** A navigate can report success while the tab stays on `chrome://newtab`. Check `location.hostname` before acting.
-- **Allow 35 to 40 seconds** after navigating a slow page. A shorter wait returns empty output with no error, which reads like failure.
+- **A slow page needs a bigger ceiling, not a longer wait.** `cic` returns the moment the bridge replies, so `--timeout` costs nothing when the page is quick; raise it to 60 for a slow navigation rather than accepting a truncated answer. Reading a page before it has settled still returns empty content, which reads like failure, so verify rather than assume (above).
 - **The bridge redacts secret-shaped values.** Anything returned containing a query string, cookie, JWT shape or base64 comes back as `[BLOCKED: …]`. Return parsed fields and counts, never the URL you fetched, and build a literal `?` with `String.fromCharCode(63)` when a key would otherwise contain one.
 - **Auto-refreshing and log-heavy pages freeze the renderer** at the 45 second CDP limit. Turn refresh off, or fetch from a static page on the same origin.
 - Tab ids change after a Chrome restart.

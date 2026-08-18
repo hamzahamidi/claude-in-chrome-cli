@@ -57,7 +57,7 @@ fi
 EXPECTED="./.claude-plugin/plugin.json
 ./.mcp.json
 ./LICENSE
-./cic.sh
+./bin/cic.js
 ./skills/using-claude-in-chrome/SKILL.md
 ./tabs_mcp.js"
 ACTUAL="(cache directory missing)"
@@ -107,6 +107,40 @@ process.exit(
   check "the extension bridge is still registered as claude --claude-in-chrome-mcp" 0
 else
   check "the extension bridge is still registered as claude --claude-in-chrome-mcp" 1
+fi
+
+# Installation path 1, the plugin: the bundled CLI runs from the installed
+# cache. cic.sh was the plugin's shell entry point until 0.4.0 deleted it, so
+# this asserts the replacement actually shipped and starts.
+if [ -f "$CACHE_DIR/bin/cic.js" ] && [ "$(node "$CACHE_DIR/bin/cic.js" --version)" = "$VERSION" ]; then
+  check "the plugin's bundled cic runs from the installed cache" 0
+else
+  check "the plugin's bundled cic runs from the installed cache" 1
+fi
+
+# Installation path 2, npm. `npm pack` builds exactly what `npm publish` would
+# upload, and installing that tarball globally into a throwaway prefix is the
+# only way to prove the `cic` command users actually type gets created and runs.
+# Inspecting the tarball is not enough: it says nothing about the bin link.
+PACK_DIR="$FAKE_HOME/pack"
+NPM_PREFIX="$FAKE_HOME/npm-global"
+NPM_LOG="$FAKE_HOME/npm-install.log"
+mkdir -p "$PACK_DIR" "$NPM_PREFIX"
+if (cd "$REPO" && npm pack --pack-destination "$PACK_DIR" >/dev/null 2>&1) &&
+  TARBALL=$(find "$PACK_DIR" -name '*.tgz' | head -1) && [ -n "$TARBALL" ]; then
+  check "npm pack builds a publishable tarball" 0
+else
+  check "npm pack builds a publishable tarball" 1
+fi
+
+if [ -n "${TARBALL:-}" ] &&
+  npm install -g "$TARBALL" --prefix "$NPM_PREFIX" >"$NPM_LOG" 2>&1 &&
+  [ -x "$NPM_PREFIX/bin/cic" ] &&
+  [ "$(PATH="$NPM_PREFIX/bin:$PATH" cic --version)" = "$VERSION" ]; then
+  check "npm install -g creates a cic command that runs" 0
+else
+  check "npm install -g creates a cic command that runs" 1
+  [ -f "$NPM_LOG" ] && sed 's/^/  /' "$NPM_LOG"
 fi
 
 if [ "$fails" -eq 0 ]; then
