@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.5.0 (unreleased)
+## 0.5.0 (2026-08-18)
 
 Moves the MCP protocol out of the command line into one internal `BridgeSession`: spawn the child, negotiate initialization in the order the specification requires, allocate request ids, validate replies before anyone reads them, and terminate and reap the child on the way out. `cic list` and `cic call` are now create-session, one call, close. What is left in `bin/cic.js` is arguments, output, retries and the exit-code contract.
 

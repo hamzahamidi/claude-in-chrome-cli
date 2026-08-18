@@ -85,7 +85,7 @@ Worth recording for the next manual publish, if there ever is one: `npm publish`
 
 Risk: Codecov's OIDC support has a reported failure mode where the CLI ignores the credential, falls back to tokenless and then fails a rate limit. The upload step is therefore allowed to fail loudly rather than carrying `continue-on-error`, and it is skipped on fork pull requests, which are issued no `id-token` at all.
 
-## v0.5.0: a portable session core
+## v0.5.0: a portable session core (shipped 2026-08-18)
 
 Theme: one protocol implementation, proven on every supported platform.
 
