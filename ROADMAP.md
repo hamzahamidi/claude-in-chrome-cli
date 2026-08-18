@@ -16,7 +16,7 @@ Three rules hold across every release below.
 
 Docs corrections only (#3). The README, the skill and the code comments now describe how the browser tools actually behave: the tab group is the only boundary, windows are irrelevant, and `chrome-devtools` is not sessionless.
 
-## v0.3.0: see every tab, in Node (reworks #4)
+## v0.3.0: see every tab, in Node (shipped 2026-08-18)
 
 Theme: the tab-visibility gap closes, shipping once, in the target runtime.
 
@@ -29,6 +29,18 @@ Theme: the tab-visibility gap closes, shipping once, in the target runtime.
 Non-goals: no `cic.sh` changes, no write operations on tabs.
 
 Risk: SNSS is an undocumented Chromium internal and can shift across Chrome versions. Mitigated by fail-closed parsing, generated fixtures and read-only validation against real macOS profiles. Windows and Linux discovery are covered by injected unit tests, not real installations. Also to verify rather than assume: that `node` is on PATH for plugin users, since Claude Code's native builds may not guarantee it.
+
+## v0.3.1: ship the plugin, not the repository
+
+Theme: the installed plugin cache contains runtime files, not the project's tests and development history.
+
+- Move the plugin root into `plugins/claude-in-chrome/` and change its marketplace source from `"./"` to `"./plugins/claude-in-chrome"`. The repository remains the Git-backed marketplace; no GitHub Actions publishing job, generated archive or release asset sits in the installation path.
+- The plugin subtree contains only what runs or is legally required: `.claude-plugin/plugin.json`, `.mcp.json`, `skills/`, `tabs_mcp.js`, the plugin copy of `cic.sh`, and `LICENSE`. Tests, fixtures, screenshots, repository docs, the roadmap and GitHub workflow files stay outside it and are therefore not copied into Claude Code's versioned plugin cache.
+- Preserve the existing root `cic.sh` download URL for standalone users. Until v0.4.0 deletes the shell implementation, CI asserts that the root script and the plugin's bundled copy are byte-for-byte identical so the temporary duplication cannot drift.
+- Add an install-level test from a clean checkout: validate the marketplace, install `claude-in-chrome`, assert the cached plugin contains only the allowlisted runtime surface, start `chrome-tabs` through its `${CLAUDE_PLUGIN_ROOT}` path, and verify that the extension bridge still registers as `claude --claude-in-chrome-mcp`.
+- Bump `plugin.json` and the server version to 0.3.1 together. The explicit version is Claude Code's cache key, so the package-boundary change must be a real versioned update; the published v0.3.0 tag and release remain untouched.
+
+Non-goals: no parser behavior change, no new MCP tool, and no change to `cic.sh` semantics. This is packaging hygiene only.
 
 ## v0.4.0: cic in Node, cic.sh retired
 
