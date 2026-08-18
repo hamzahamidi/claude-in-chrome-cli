@@ -8,9 +8,11 @@ Each release is small and shippable on its own. The non-goals are part of the pl
 
 Three rules hold across every release below.
 
-1. **`cic call` never owns a schema.** Pure pass-through is why the CLI cannot break when the extension changes its tools. Friendly verbs (0.5.0) each own one positional argument mapping at most; `cic call` remains the schema-agnostic escape hatch forever.
-2. **The exit-code contract is defined at 0.4.0 and frozen from then on:** 0 success, 1 tool error (a JSON-RPC error or `isError: true`), 2 outcome unknown (the `tools/call` request was written and no usable reply came back, whether by timeout, the child exiting, a malformed reply or an I/O failure), 3 failure strictly before the `tools/call` request was written (`claude` missing or failing to spawn, the initialize handshake failing, an unsupported protocol version), 64 usage error or invalid arguments JSON. The boundary between 2 and 3 is whether the request went out: exit 3 means the browser cannot have acted, so it is the only class safe to retry. With `--json`, every failure emits one line on stdout in the frozen shape `{"error": true, "kind": "tool_error" | "unknown_outcome" | "transport" | "usage", "exit": 1 | 2 | 3 | 64, "message": "<human readable>"}`, so a machine caller never has to parse an empty stream. Known defect until then: `cic.sh` exits 0 on tool errors, so a pipeline proceeds after a failure. That is fixed by the Node CLI, not patched in shell.
+1. **`cic call` never owns a schema.** Pure pass-through is why the CLI cannot break when the extension changes its tools. Friendly commands introduced from 0.7.0 onward may own narrow mappings for the behavior they add; `cic call` remains the schema-agnostic escape hatch forever.
+2. **The exit-code contract is defined at 0.4.0 and frozen from then on:** 0 success, 1 tool error (a JSON-RPC error or `isError: true`), 2 outcome unknown (the `tools/call` request was written and no usable reply came back, whether by timeout, the child exiting, a malformed reply or an I/O failure), 3 failure strictly before the `tools/call` request was written (`claude` missing or failing to spawn, the initialize handshake failing, an unsupported protocol version), 64 usage error or invalid arguments JSON. The boundary between 2 and 3 is whether the request went out: exit 3 means the browser cannot have acted, so it is the only class safe to retry. With `--json`, every failure emits one line on stdout in the frozen shape `{"error": true, "kind": "tool_error" | "unknown_outcome" | "transport" | "usage", "exit": 1 | 2 | 3 | 64, "message": "<human readable>"}`, so a machine caller never has to parse an empty stream. The retired `cic.sh` violated this contract by exiting 0 on tool errors; the Node CLI fixed it rather than preserving that behavior.
 3. **`plugin.json` is the single source of truth for the version.** CI asserts every other version constant matches it.
+
+One boundary is deliberately outside the release sequence: this project will not grow a second Chrome DevTools Protocol implementation for arbitrary daily-Chrome tabs. `list_open_tabs` stays passive, `reopen-tab` will create a new managed tab from a recovered URL, and true adoption of an existing tab belongs upstream in the Claude-in-Chrome extension or bridge. Users who need full-browser CDP access should use Chrome DevTools MCP.
 
 ## v0.2.3: docs tell the truth (shipped 2026-08-17)
 
@@ -30,7 +32,7 @@ Non-goals: no `cic.sh` changes, no write operations on tabs.
 
 Risk: SNSS is an undocumented Chromium internal and can shift across Chrome versions. Mitigated by fail-closed parsing, generated fixtures and read-only validation against real macOS profiles. Windows and Linux discovery are covered by injected unit tests, not real installations. Also to verify rather than assume: that `node` is on PATH for plugin users, since Claude Code's native builds may not guarantee it.
 
-## v0.3.1: ship the plugin, not the repository
+## v0.3.1: ship the plugin, not the repository (shipped 2026-08-18)
 
 Theme: the installed plugin cache contains runtime files, not the project's tests and development history.
 
@@ -42,7 +44,7 @@ Theme: the installed plugin cache contains runtime files, not the project's test
 
 Non-goals: no parser behavior change, no new MCP tool, and no change to `cic.sh` semantics. This is packaging hygiene only.
 
-## v0.4.0: cic in Node, cic.sh retired
+## v0.4.0: cic in Node, cic.sh retired (shipped 2026-08-18)
 
 Theme: one implementation, and it stops lying to pipelines.
 
@@ -81,44 +83,79 @@ Worth recording for the next manual publish, if there ever is one: `npm publish`
 
 Risk: Codecov's OIDC support has a reported failure mode where the CLI ignores the credential, falls back to tokenless and then fails a rate limit. The upload step is therefore allowed to fail loudly rather than carrying `continue-on-error`, and it is skipped on fork pull requests, which are issued no `id-token` at all.
 
-## v0.5.0: Windows, and friendly verbs
+## v0.5.0: a portable session core
 
-Theme: the platform claim becomes real, and the common path stops requiring hand-written JSON.
+Theme: one protocol implementation, proven on every supported platform.
 
-- CI matrix: ubuntu, macos, windows, on Node 22 and 24. All tests are offline, so CI cannot flake on Chrome. Windows support formally claimed in the README, with the Windows and Linux profile paths verified against fixtures.
-- Friendly verbs for roughly six tools: `cic navigate <url>`, `cic text [tabId]`, `cic screenshot [-o out.png]` (finally an exit route for image content, which `cic.sh` discarded as `[image]`), `cic find "<query>"`, `cic js "<code>"`, and `cic tabs` (reads the session-file parser directly; a local file read needs no MCP round trip).
-- This is where the CLI starts owning schemas, and the line is drawn explicitly: each verb maps its positionals to the single most-stable argument key, does no client-side schema validation, passes extras through `--arg key=value`, and surfaces server errors verbatim. The cost is accepted and documented: an extension-side rename breaks a verb until patched. `cic call` never breaks.
-- `--retries N` with backoff, only on the exit-3 class, where the request never went out. Nothing after dispatch is retried automatically, whether it failed by timeout, child exit or malformed reply: the action may already have run in the browser, and retrying a click, a submit or a `javascript_tool` call repeats it. Exit 2 keeps meaning "outcome unknown" and the caller decides.
+- Extract the MCP lifecycle from the command-line path into one internal `BridgeSession`: start the `claude --claude-in-chrome-mcp` child, negotiate and validate initialization, allocate request ids, parse replies, preserve the dispatched/not-dispatched boundary, forward stderr safely, enforce timeouts, and close and reap the child.
+- Refactor the existing one-shot commands onto that core: `cic call` becomes create session, make one call, close. Its stdout, stderr, exit codes and frozen `--json` shape do not change.
+- Calls are serialized. Reply demultiplexing may exist inside the core, but concurrent browser actions do not become public behavior until there is evidence that their ordering can be explained safely.
+- Expand CI to Ubuntu, macOS and Windows on Node 22 and 24. The offline hostile-server corpus runs everywhere, and Windows support is claimed only once those process-lifecycle tests pass there. Windows and Linux browser-profile discovery remain fixture-backed until they are also checked on real installations.
+- `--retries N` with backoff remains limited to exit 3, where the request was never dispatched. Exit 2 is never retried automatically.
 
-Verbs ship two releases before 1.0 deliberately, so names can still change on real usage feedback.
+Non-goals: no long-lived public mode, no workflow syntax, no daemon, and no friendly tool aliases. This release changes the implementation boundary and makes the platform claim real without changing the one-shot contract.
 
-## v0.6.0: stay connected
+## v0.6.0: foreground sessions
 
-Theme: one live MCP connection.
+Theme: many calls over one live MCP connection, without a background process.
 
-- `cic serve`, a daemon (or auto-spawned on `--session`) holding one `claude --claude-in-chrome-mcp` child: unix socket (named pipe on Windows), request-id allocation, reply demultiplexing, idle-timeout shutdown, `cic session stop`.
-- One-shot stays the default and `--session` is opt-in, so a daemon bug never breaks the default path. Per-call cost drops from process spawn plus handshake to a socket round trip, and the tab group survives between calls, which removes the empty-tab-group-per-invocation defect entirely.
-- The transport carries a security and compatibility contract, because whoever reaches the socket drives a logged-in browser: the socket lives in a directory owned by the current user with 0700 permissions (a DACL restricted to the current user for the Windows named pipe), the CLI and daemon exchange a version handshake on connect so a stale daemon left over from before an npm upgrade is detected and replaced rather than trusted, and auto-spawn takes an atomic lock so two racing invocations cannot start two daemons.
+- `cic session --jsonl` holds one `BridgeSession` open. Each input line carries a caller-chosen id, tool name, arguments and optional timeout; each output line carries the same id and a per-request outcome. The caller owns sequencing and dynamic values such as a returned `tabId`; `cic` owns the connection.
+- A persistent process cannot report every call through its own exit status. Each response envelope therefore carries the one-shot classification (`exit`, `kind`, result or message), while the process exit code describes only startup, clean shutdown or a fatal session failure.
+- Calls are processed serially. An exit-2 unknown outcome is fatal to the session by default: emit its record, close and reap the bridge, and require a fresh session so a later action cannot silently race an earlier action whose outcome is unknown.
+- `cic shell` is a small human REPL over the same streaming interface. It initially has no variables, captures, aliases, implicit current tab or control flow.
+- The JSONL protocol and its backpressure, malformed-input and shutdown behavior are driven by offline tests on all three operating systems.
 
-This release ships nothing else. It is the hardest engineering in the roadmap: lifecycle, stale sockets, crash recovery, and two IPC implementations.
+Non-goal: no `batch` workflow language. Captures, references, dependencies, interpolation, conditions and loops belong to the calling program unless real usage later justifies a separate design.
 
-## v0.7.0: tabs with names
+## v0.7.0: tab lifecycle and useful output
 
-Theme: first persistent state.
+Theme: solve lifecycle and transport gaps before adding spelling shortcuts.
 
-- `cic tab name <name> <tabId>` records a mapping (the id is explicit; there is no "current tab" to infer), and `--tab <name>` is accepted by the friendly verbs. It is deliberately not accepted by `cic call`: injecting a tabId into caller-supplied arguments would mean owning the schema, which the first invariant forbids. Raw calls compose instead through `cic tab resolve <name>`, which prints the id.
-- One store for both modes: a single atomic on-disk file (`~/.cache/cic/state.json`). The daemon reads and writes the same file rather than holding names in memory, so an idle-timeout shutdown loses nothing.
-- The staleness rule: a name-to-id mapping is validated against the live tab list on every read, because tab ids die with a Chrome restart. A dead mapping produces a specific error and is pruned, never silently reused.
+- Add a library-level `withTab` helper on `BridgeSession`: create, navigate, hand the `tabId` to a callback, and close on success or ordinary tool error. Unknown outcomes get an explicit fail-closed cleanup policy, and `keepTab: true` preserves the tab for debugging. Its behavior is tested before a CLI spelling is frozen.
+- Add screenshot-to-file output, including binary validation, atomic writes and refusal to corrupt a destination after a malformed or partial result.
+- Add `cic tabs` as a direct facade over the local session parser; it does not spawn the MCP bridge for a read that only needs the filesystem.
+- Expose a narrow tab-lifecycle CLI only after the helper contract is proven. The roadmap deliberately does not invent nested command syntax or a mini workflow language in advance.
 
-## v0.8.x: stabilization
+Deferred, not rejected: `navigate`, `text`, `find` and `js`. They improve discoverability and avoid nested JSON quoting, especially in PowerShell, but they do not precede connection, lifecycle and file-output capabilities.
 
-A bug-fix-only runway, as many patches as it takes. Soak the daemon, fix Windows papercuts, freeze the docs. Explicit non-goal: any new feature.
+## v0.8.0: reopen a discovered tab safely
+
+Theme: connect passive discovery to a managed, actionable tab without claiming to adopt the original renderer.
+
+- `reopen-tab` searches the local parser by redacted URL metadata and title, resolves a unique candidate (or reports ambiguity), creates a Claude-managed tab, navigates it to the recovered URL and returns the new actionable `tabId`.
+- The raw URL remains inside the process: it is read by importing the parser, passed directly to the MCP child over stdin, and never placed in process arguments, stdout candidates, logs, errors or shell history. Initial support is limited to ordinary HTTP(S) URLs.
+- The name is intentional. Reopening does not preserve DOM state, form values, scroll position, JavaScript state, navigation history or active connections.
+- Open an upstream request for a true `adopt_tab` or `add_tab_to_group` bridge operation. Do not simulate adoption with CDP inside this project.
+
+## v0.9.0: optional daemon
+
+Theme: persistence across separate CLI processes, built around the already-proven session core.
+
+- A daemon holds one `BridgeSession` and exposes it over a Unix socket or Windows named pipe. It adds request routing, idle-timeout shutdown and explicit start/stop/status commands; it does not reimplement MCP negotiation, validation or child cleanup.
+- One-shot remains the default and daemon use is opt-in, so IPC failure never breaks the basic path. The foreground JSONL mode remains available for callers that want persistence without background state.
+- Whoever reaches the IPC endpoint drives a logged-in browser. The socket therefore lives in a user-owned 0700 directory; the Windows pipe uses a DACL restricted to the current user. Client and daemon exchange a version handshake, and auto-spawn takes an atomic lock so upgrades and racing callers cannot attach to the wrong process.
+- Offline tests cover stale endpoints, concurrent startup, version mismatch, crash recovery, idle shutdown and child reaping on all three operating systems.
+
+This is still the hardest release in the roadmap, but by this point connection lifecycle and request semantics are reused rather than debugged through two layers at once.
+
+## v0.10.0: tabs with names, and observed conveniences
+
+Theme: first persistent user state, after session behavior has survived real use.
+
+- `cic tab name <name> <tabId>` records an explicit mapping. Friendly lifecycle commands may accept `--tab <name>`; `cic call` does not, because injecting a `tabId` into caller-owned arguments would violate the first invariant. Raw calls compose through `cic tab resolve <name>`, which prints the id.
+- One atomic on-disk store is shared by foreground, daemon and one-shot modes, so process shutdown loses nothing.
+- A mapping is validated against the live managed-tab list on every read. A dead id produces a specific error and is pruned, never silently reused after Chrome restarts.
+- Add only the deferred convenience verbs that real foreground-session and Windows usage has justified. Their names and positionals remain pre-1.0 and may still change.
+
+## v0.11.x: stabilization
+
+A bug-fix-only runway, as many patches as it takes. Soak foreground sessions and the daemon, fix Windows papercuts, freeze the JSONL and command contracts, and finish the release checklist. Explicit non-goal: any new feature.
 
 ## v1.0.0: the contract release
 
 1.0 means, concretely:
 
-1. Frozen contracts: the exit-code map and `--json` shape (unchanged since 0.4.0) and the verb names and positionals (unchanged since 0.5.0). Changing any of them after 1.0 requires a major bump.
+1. Frozen contracts: the exit-code map and `--json` shape (unchanged since 0.4.0), the foreground-session JSONL envelope, and every shipped command name and positional. Changing any of them after 1.0 requires a major bump.
 2. Three-OS CI green, including offline daemon lifecycle tests.
 3. The persistent session survives a week of the maintainer's real daily use without a hang or an orphaned process.
 4. One repo, one version number, shipping as both an npm package and a Claude Code plugin, with a release checklist in CONTRIBUTING.
