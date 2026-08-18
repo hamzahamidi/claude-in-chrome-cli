@@ -241,6 +241,20 @@ function replyTo(message) {
   if (delayMs) { setTimeout(() => send(reply), delayMs); } else { send(reply); }
 }
 
+// Fails the handshake a fixed number of times, then succeeds, by counting
+// attempts in a file across separate stub processes. Proves --retries actually
+// retries, and that it stops once a call goes through.
+if (mode === 'flaky-handshake') {
+  const fs = require('fs');
+  const file = process.env.CIC_STUB_ATTEMPTS;
+  const failures = Number(process.env.CIC_STUB_FAIL_TIMES || 1);
+  let seen = 0;
+  try { seen = Number(fs.readFileSync(file, 'utf8')) || 0; } catch { seen = 0; }
+  fs.writeFileSync(file, String(seen + 1));
+  // Exit before answering initialize: pre-dispatch, so exit 3 and retryable.
+  if (seen < failures) { process.exit(4); }
+}
+
 if (mode === 'spawn-failure') { process.exit(9); }
 if (mode === 'stderr') { process.stderr.write('stub: the extension is not connected\n'); }
 

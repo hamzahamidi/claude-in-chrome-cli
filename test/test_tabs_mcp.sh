@@ -15,9 +15,23 @@ trap 'rm -rf "$TMP"' EXIT
 # layout in tabs_mcp.js, so tools/call has real (synthetic) data to answer
 # with rather than only exercising the "nothing found" fallback.
 FAKE_HOME="$TMP/home"
+# The layout has to match what tabs_mcp.js looks for on THIS platform, not on
+# the platform the shell resembles. Under Git Bash on Windows `uname -s` says
+# MINGW/MSYS while Node still reports win32 and reads LOCALAPPDATA, so a
+# Linux-shaped profile here would leave the server finding nothing and the
+# synthetic-data assertions would fail for the wrong reason.
 case "$(uname -s)" in
-  Darwin) PROFILE_DIR="$FAKE_HOME/Library/Application Support/Google/Chrome/Default/Sessions" ;;
-  *)      PROFILE_DIR="$FAKE_HOME/.config/google-chrome/Default/Sessions" ;;
+  Darwin)
+    PROFILE_DIR="$FAKE_HOME/Library/Application Support/Google/Chrome/Default/Sessions"
+    ;;
+  MINGW*|MSYS*|CYGWIN*)
+    LOCALAPPDATA="$FAKE_HOME/AppData/Local"
+    export LOCALAPPDATA
+    PROFILE_DIR="$LOCALAPPDATA/Google/Chrome/User Data/Default/Sessions"
+    ;;
+  *)
+    PROFILE_DIR="$FAKE_HOME/.config/google-chrome/Default/Sessions"
+    ;;
 esac
 mkdir -p "$PROFILE_DIR"
 node -e '

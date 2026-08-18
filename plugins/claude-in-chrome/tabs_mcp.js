@@ -18,7 +18,7 @@ const path = require('path');
 const readline = require('readline');
 
 const SERVER_NAME = 'chrome-tabs';
-const SERVER_VERSION = '0.4.1';
+const SERVER_VERSION = '0.5.0';
 const PROTOCOL_VERSION = '2024-11-05';
 
 // chromium/components/sessions/core/session_service_commands.cc

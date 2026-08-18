@@ -58,6 +58,7 @@ cic call <tool> [json-args]   # call a tool, arguments default to {}
 | Option | What it does |
 | --- | --- |
 | `--timeout <secs>` | Ceiling on how long to wait for the reply. Default 30. |
+| `--retries <n>` | Retry only failures that never reached the browser (exit 3). Default 0. |
 | `--json` | Print the raw result object, or one error object, on one line |
 | `-h`, `--help` | Usage |
 | `-v`, `--version` | Print the version |
@@ -74,7 +75,7 @@ Exit codes are a contract, frozen from 0.4.0 onward:
 | `3` | Failed before the request was sent, so the browser cannot have acted |
 | `64` | Usage error, or invalid arguments JSON |
 
-Only exit 3 is safe to retry automatically. Exit 2 means the click, submit or script may already have run.
+Only exit 3 is safe to retry automatically, which is the only thing `--retries` will retry. Exit 2 means the click, submit or script may already have run, so repeating it would be a second action rather than a second look at the first.
 
 ### Moving from `cic.sh`
 

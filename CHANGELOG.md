@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.5.0 (unreleased)
+
+Moves the MCP protocol out of the command line into one internal `BridgeSession`: spawn the child, negotiate initialization in the order the specification requires, allocate request ids, validate replies before anyone reads them, and terminate and reap the child on the way out. `cic list` and `cic call` are now create-session, one call, close. What is left in `bin/cic.js` is arguments, output, retries and the exit-code contract.
+
+The proof that a refactor changed nothing is the old tests passing untouched, so that came first: all 120 checks from 0.4.1 ran green against the new core before a single new test was written. The session object exists because 0.6.0 needs to hold one open across many calls, and doing that on top of a lifecycle tangled into argument parsing would have meant rewriting it twice.
+
+Adds `--retries <n>`, restricted to failures that never reached the browser. Exit 3 is the only retryable class by definition: the request was not dispatched, so the browser cannot have acted. An exit-2 unknown outcome is never retried whatever the flag says, because repeating a click is a second action rather than a second look at the first. Backoff is exponential from 250ms, capped at 4s.
+
+Writing that flag produced a bug worth recording, because it is the same family as the truncation bug in 0.4.0: the backoff timer was `unref`'d, so it did not hold the event loop open. By the time a retry is waiting, the child is dead and its pipes are destroyed, so nothing else held it either, and Node exited cleanly with code 0 in the middle of the backoff, reporting success for a call that never happened. Exiting before the work finishes keeps being the failure mode here.
+
+Two defects in that new core came out of review, both invisible to one-shot use and both fatal to the reuse it exists for. The dispatched flag was set after the request write resolved, leaving a window where the child had already received the request and replied badly or died while the session still reported nothing dispatched: the failure was then classified exit 3, and `--retries` would have repeated an action that had already run. The flag now leads the write rather than following it, and a write that fails outright still counts as dispatched, because a broken pipe does not prove nothing arrived and that is the only direction whose wrong guess can repeat a click. The regression test was checked against the old ordering to confirm it fails there.
+
+The second was four listeners per request, never detached. One-shot use never noticed; twelve sequential calls on one session reached thirteen `data` listeners and Node began warning about a leak. They come off on settlement now. `test/test_bridge_session.js` covers both from inside the process, since neither when the flag flips nor how many listeners are attached can be observed from outside it, and that file is where 0.6.0's session reuse will be proven.
+
+Known limit carried into 0.6.0: each request owns its own reader and buffer, so bytes arriving between calls are dropped. Serialized one-shot use never sees this, but a long-lived streaming session needs one persistent reader with a per-id waiter map instead.
+
+CI expands to Ubuntu, macOS and Windows on Node 22 and 24, six legs, none of them cancelling the others. Windows gets honest assertions rather than borrowed ones: a child there cannot refuse a signal, because Node maps `kill()` to `TerminateProcess`, so the test that proves SIGTERM escalation on POSIX proves only that the client asked on Windows, and says so in its own label. Two tests stay POSIX-only and print a visible `skip` line with the reason: the EPIPE pipeline needs a POSIX shell, and the detached-descendant shutdown test needs POSIX fd inheritance. Weakening them into assertions that pass everywhere would have made the support claim look broader than the evidence. The handshake test also grew a Windows branch, since Git Bash reports MINGW while Node still reads `LOCALAPPDATA`, and a Linux-shaped fixture profile would have failed there for the wrong reason.
+
+Coverage moved from 95.31% to 95.89% of statements and 84.71% to 85.54% of branches. The published tarball is 5 files, adding `lib/bridge-session.js`, and the installed plugin cache is 7.
+
 ## 0.4.1 (2026-08-18)
 
 Closes the validation gaps 0.4.0 shipped with, listed there as known limits. Coverage was measured first, so these fixes have a number behind them rather than a claim: 94.95% of statements and 82.55% of branches before, 95.31% and 84.71% after, with the floor set from the earlier baseline so the new code had to be covered rather than merely added.
