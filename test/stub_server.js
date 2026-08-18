@@ -202,6 +202,21 @@ function replyTo(message) {
     return;
   }
 
+  // A tool whose description is present but not a string. The array and the
+  // names are fine, so only member validation catches this.
+  if (mode === 'tool-bad-description') {
+    send({ jsonrpc: '2.0', id, result: { tools: [{ name: 'navigate', description: 42 }] } });
+    return;
+  }
+
+  // A complete reply with no trailing newline, then end of stream. The reader
+  // has to flush what is left in its buffer or this reads as no reply at all.
+  if (mode === 'no-trailing-newline') {
+    process.stdout.write(JSON.stringify(callResult(id)));
+    setTimeout(() => process.exit(0), 30);
+    return;
+  }
+
   if (mode === 'tool-without-name') {
     send({ jsonrpc: '2.0', id, result: { tools: [{ description: 'nameless' }] } });
     return;

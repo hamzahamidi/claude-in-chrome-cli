@@ -164,5 +164,25 @@ check('and it says why rather than just stopping',
 
 check('shell takes no positional arguments', run(['shell', 'extra'], []).status, 64);
 
+// A shell that cannot reach the bridge says so on the way out rather than
+// dropping the user at a prompt that can never work.
+const shellNoBridge = run(['shell', '--timeout', '2'], ['navigate'],
+  { env: { CIC_CLAUDE_BIN: '/nonexistent/claude' } });
+check('a shell that cannot start reports transport', shellNoBridge.status, 3);
+check('and explains itself rather than exiting silently',
+  /ENOENT|could not|bridge failed/.test(shellNoBridge.stdout + shellNoBridge.stderr), true);
+
+// Arguments that parse but are not an object.
+const shellArray = run(['shell', '--timeout', '2'], ['navigate [1,2]', 'get_page_text']);
+check('a shell line with non-object arguments is refused',
+  /must be a JSON object/.test(shellArray.stdout), true);
+check('and the shell carries on to the next line',
+  /stub replied/.test(shellArray.stdout), true);
+
+// A JSON-RPC error reaches the shell user as a message, not a crash.
+const shellToolError = run(['shell', '--timeout', '2'], ['navigate'], { mode: 'tool-error' });
+check('a tool error is printed in the shell', /tool blew up/.test(shellToolError.stdout), true);
+check('and the shell still exits 0, since the session is healthy', shellToolError.status, 0);
+
 console.log(failures ? `\n${failures} failed` : '\nall passed');
 process.exit(failures ? 1 : 0);
