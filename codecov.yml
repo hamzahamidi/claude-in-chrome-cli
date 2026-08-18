@@ -1,9 +1,12 @@
-# Non-regression, not a target picked by taste. `auto` compares each commit
-# against its base, so the gate is "do not lose coverage", and the threshold is
-# the slack that keeps a one-line move from failing a build.
+# The real gate, and the only relative one: `auto` compares each commit against
+# its base, so the rule is "do not lose coverage", with a threshold of slack so
+# a one-line move cannot fail a build.
 #
-# The measured baseline when this was added, at 0.4.0, was 94.95% of lines and
-# 82.55% of branches. Nothing here encodes an aspiration above that.
+# The absolute floors in .c8rc.json are a coarse backstop for the same property,
+# not a second opinion about it. They sit below the measured 0.4.0 baseline
+# (94.95% of lines, 82.55% of branches) and exist so a local run fails too,
+# without waiting for Codecov. Neither number is an aspiration; raise them only
+# by measuring first.
 coverage:
   status:
     project:
