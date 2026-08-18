@@ -17,13 +17,16 @@ Normally you reach those tools from inside a Claude session. Sometimes you just 
 
 The plugin is a second front door. Install it to make `navigate`, `read_page`, `find`, `computer`, `get_page_text`, and the rest of the extension tools available natively in new Claude Code sessions.
 
+It also adds one tool the extension cannot provide. The bridge only ever sees tabs inside its own tab group, so "what have I got open?" is unanswerable through it. `list_open_tabs` answers it by reading Chrome and Chromium session data from disk, with no debugging port, no extension and no tab group. It lists every tab it can recover from each readable profile and reports encrypted, unsupported or unreadable profiles instead of treating them as empty. Measured on one machine: the bridge could see 4 tabs, `list_open_tabs` saw 29, of which 25 were outside the group. It reads URLs and titles, not page content, and it cannot drive a page.
+
 Where this is going, release by release: see the [roadmap](ROADMAP.md).
 
 ## Requirements
 
 - The **Claude Code CLI** (`claude`) on your PATH.
-- The **Claude in Chrome** extension installed and connected to a running Chrome.
+- The **Claude in Chrome** extension installed and connected to a running Chrome for the browser-driving tools. `list_open_tabs` does not need it.
 - `python3` (parses the JSON-RPC reply; `cic.sh` only).
+- **Node.js 22 or later**, for the `chrome-tabs` server behind `list_open_tabs`.
 
 ## Install
 
@@ -96,6 +99,18 @@ The exact set depends on your extension version. Run `./cic.sh --list` for the l
 
 Argument shapes come from the extension, not from this script. The `--list` output includes each tool's description, which documents its arguments.
 
+One tool does not come from the extension. The plugin ships [`tabs_mcp.js`](tabs_mcp.js) as a second MCP server, `chrome-tabs`:
+
+| Tool | What it does |
+| --- | --- |
+| `list_open_tabs` | Tabs recoverable from readable session data across every window and recognized profile |
+
+It takes an optional `profile` to narrow to one Chrome profile, and `include_urls: false` to get counts and hosts without the per-tab list. URLs are redacted by default to origin and path, since a raw URL read straight off disk can carry credentials, a token, a session id or a sensitive query string; pass `full_urls: true` only when the raw URL is actually needed.
+
+The server scans every recognized `Default` and `Profile *` directory for Chrome and Chromium, not just the profile the bridge happens to be using. Profiles whose session storage is encrypted or in an unsupported format are reported, but their tabs cannot be listed. If the newest initial snapshot never completed, the reader falls back to an older trustworthy file; if a completed snapshot only lost later incremental updates, it returns the recovered tabs with an incomplete warning. This is a best-effort reader of Chromium's undocumented SNSS format: it cannot identify the focused tab, and uncommon history-pruning events can leave a tab's reported page stale.
+
+`list_open_tabs` is read only, needs nothing running, and is the answer whenever the question is "what is open" rather than "drive this page". It is not available through `cic.sh`, which talks to the extension bridge instead.
+
 ## How it works
 
 An MCP stdio server reads newline-delimited JSON-RPC on stdin and writes responses on stdout. `cic.sh` sends three messages, then sleeps to let the reply arrive:
@@ -113,7 +128,7 @@ Each call is its own stdio session, so nothing persists in the CLI between calls
 - It drives your real, logged-in browser. Treat it like handing a script your keyboard.
 - No streaming: you get the result after `wait_secs`. Raise it for slow actions.
 - One tool per invocation. For sequences, run several calls or use `browser_batch`.
-- **The tab group is the boundary.** `tabs_context_mcp` lists the tabs in the extension's group and nothing else. No tool pulls another one in: there is no move, no "all windows" flag, and `select_browser` picks a browser rather than a tab. Which window a tab sits in makes no difference. To act on a page you already have open, re-open its URL in a group tab, or add your tab to the group from Chrome's own tab context menu. To merely *list* what you have open, skip the bridge entirely and parse Chrome's session file (`<profile>/Sessions/Session_*`, newest by mtime, SNSS format): no port, no group, no setup.
+- **The tab group is the boundary.** `tabs_context_mcp` lists the tabs in the extension's group and nothing else. No tool pulls another one in: there is no move, no "all windows" flag, and `select_browser` picks a browser rather than a tab. Which window a tab sits in makes no difference. To act on a page you already have open, re-open its URL in a group tab, or add your tab to the group from Chrome's own tab context menu. To merely *list* what you have open, call `list_open_tabs`: it uses the separate `chrome-tabs` server and needs no port, group or extension connection, subject to the readable-profile limitations above.
 - **No DevTools protocol.** Navigation, reading and interaction only, so no performance traces, and `navigate` cannot load a `chrome://` URL (it prefixes the scheme).
 
 For CDP work, reach for [`chrome-devtools-mcp`](https://github.com/ChromeDevTools/chrome-devtools-mcp) as it comes. It launches its own Chrome on a profile it keeps between runs (`~/.cache/chrome-devtools-mcp/chrome-profile`), so signing in there once gives you a real session on every later run, with no port open and nothing to enable. Two such servers cannot launch at once: the second answers `The browser is already running for …/chrome-profile`, and `--isolated` is the way out, at the cost of that profile's cookies.

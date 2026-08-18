@@ -1,7 +1,7 @@
 {
   "name": "claude-in-chrome",
-  "version": "0.2.3",
-  "description": "Drive your real, logged-in Chrome from Claude Code. Exposes the Claude in Chrome extension's tab tools (navigate, read_page, find, computer, get_page_text, console, network) as MCP tools via the claude --claude-in-chrome-mcp bridge. Requires the Claude Code CLI on PATH and the Claude in Chrome extension connected to a running Chrome.",
+  "version": "0.3.0",
+  "description": "Drive your real, logged-in Chrome from Claude Code, and list tabs across readable Chrome and Chromium profiles. Exposes the extension's browser tools through the Claude in Chrome bridge and adds a read-only list_open_tabs tool backed by local session data. Driving requires the connected extension and a running Chrome; tab listing requires Node.js 22 or later but no extension connection.",
   "author": {
     "name": "Hamza Hamidi"
   },
