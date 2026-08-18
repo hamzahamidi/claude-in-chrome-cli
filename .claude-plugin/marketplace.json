@@ -1,6 +1,6 @@
 {
   "name": "claude-in-chrome-cli",
-  "description": "Tools from the Claude in Chrome extension, as a Claude Code plugin or a shell script.",
+  "description": "Tools from the Claude in Chrome extension, as a Claude Code plugin or a Node.js CLI.",
   "owner": {
     "name": "Hamza Hamidi"
   },
