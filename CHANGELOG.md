@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.3.1 (unreleased)
+## 0.3.1 (2026-08-18)
 
 Moves the plugin's runtime files into `plugins/claude-in-chrome/` and points the marketplace's `source` at that subdirectory instead of the repository root. Verified directly against the real `claude` plugin CLI before relying on it: with `source` set to a subdirectory, the installed cache under `~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/` contains only that subdirectory's files. Previously the whole repository root was the plugin source, so installing `claude-in-chrome` copied `test/`, `docs/`, `ROADMAP.md` and the GitHub workflow files into Claude Code's versioned plugin cache along with the five files that actually run.
 
