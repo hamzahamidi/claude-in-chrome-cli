@@ -192,8 +192,17 @@ class BridgeSession {
     const id = this.nextId++;
     const pending = this.#awaitReply(id, timeoutSeconds || this.timeoutSeconds);
     pending.catch(() => {});
-    await this.#send({ jsonrpc: '2.0', id, method, params }, pending);
+    // Set before the write, not after it. Waiting for the write callback left a
+    // window where the child had already received the request and replied, or
+    // died, while this still said nothing was dispatched: the failure was then
+    // classified exit 3 and --retries would repeat an action that had already
+    // run. Once the bytes are handed to the pipe the outcome is unknowable, so
+    // the flag has to lead the write rather than follow it. A write that then
+    // fails outright is still counted as dispatched, because a broken pipe does
+    // not prove nothing arrived, and guessing wrong in that direction is the
+    // only guess that can repeat a click.
     this.dispatched = true;
+    await this.#send({ jsonrpc: '2.0', id, method, params }, pending);
 
     const reply = await pending;
     const bad = describeBadReply(reply, method);
@@ -277,10 +286,20 @@ class BridgeSession {
       let buffer = '';
       let settled = false;
 
+      // Every listener below is per-request and must come off on settlement.
+      // Leaving them attached leaked four per call, which one-shot use never
+      // noticed but a reused session does: twelve sequential calls reached
+      // thirteen data listeners and Node started emitting
+      // MaxListenersExceededWarning. Reuse across calls is the entire reason
+      // this class exists, so the cleanup is part of the contract, not tidiness.
       const finish = (fn, value) => {
         if (settled) { return; }
         settled = true;
         clearTimeout(timer);
+        child.stdout.removeListener('data', onData);
+        child.stdout.removeListener('end', onEnd);
+        child.removeListener('exit', onExit);
+        child.removeListener('error', onError);
         fn(value);
       };
 
@@ -322,13 +341,20 @@ class BridgeSession {
         fail(`no reply within ${timeoutSeconds}s. Raise --timeout, or check that the Claude in Chrome extension is connected.`);
       }, timeoutSeconds * 1000);
 
-      child.stdout.on('data', (chunk) => consume(String(chunk), false));
-      child.stdout.on('end', () => consume('', true));
-      child.on('exit', (code) => {
+      // Named so finish() can detach exactly these, rather than every listener
+      // on a child that later requests will also be watching.
+      const onData = (chunk) => consume(String(chunk), false);
+      const onEnd = () => consume('', true);
+      const onExit = (code) => {
         // Let the final stdout chunk land before calling this no reply.
         setImmediate(() => fail(`the bridge exited (code ${code}) before a usable reply arrived.`));
-      });
-      child.on('error', (error) => fail(`bridge failed: ${error.message}`));
+      };
+      const onError = (error) => fail(`bridge failed: ${error.message}`);
+
+      child.stdout.on('data', onData);
+      child.stdout.on('end', onEnd);
+      child.on('exit', onExit);
+      child.on('error', onError);
     });
   }
 }
