@@ -1,0 +1,21 @@
+# Non-regression, not a target picked by taste. `auto` compares each commit
+# against its base, so the gate is "do not lose coverage", and the threshold is
+# the slack that keeps a one-line move from failing a build.
+#
+# The measured baseline when this was added, at 0.4.0, was 94.95% of lines and
+# 82.55% of branches. Nothing here encodes an aspiration above that.
+coverage:
+  status:
+    project:
+      default:
+        target: auto
+        threshold: 0.5%
+    # New code reports its own number without blocking. A patch gate belongs
+    # here once there is enough history to know what a normal patch looks like.
+    patch:
+      default:
+        informational: true
+
+comment:
+  layout: reach, diff, files
+  require_changes: true

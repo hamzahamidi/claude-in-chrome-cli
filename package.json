@@ -17,11 +17,15 @@
     "test:coverage": "c8 npm test"
   },
   "c8": {
-    "//": "The tests drive both programs as child processes, which c8 follows via NODE_V8_COVERAGE. all:true counts files the suite never loads rather than hiding them.",
+    "//": "The tests drive both programs as child processes, which c8 follows via NODE_V8_COVERAGE. all:true counts files the suite never loads rather than hiding them. The floors are the 0.4.0 baseline rounded down, so they catch a regression without failing on a one-line move; they are not aspirations.",
     "include": [
       "plugins/claude-in-chrome/**/*.js"
     ],
     "all": true,
+    "check-coverage": true,
+    "lines": 94,
+    "branches": 82,
+    "functions": 100,
     "reporter": [
       "text-summary",
       "lcov"

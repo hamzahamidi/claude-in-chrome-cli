@@ -53,6 +53,9 @@ jobs:
         with:
           use_oidc: true
           files: ./coverage/lcov.info
+          # Without this the action also finds c8's raw V8 dumps in
+          # coverage/tmp and ships them: 1.37 MB of input for a 17 KB report.
+          disable_search: true
           # Never soften this. An upload step that cannot fail reports success
           # while every upload is rejected, and nobody notices for weeks.
           fail_ci_if_error: true
