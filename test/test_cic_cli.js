@@ -290,5 +290,83 @@ if (Number.isInteger(holderPid) && holderPid > 0) {
 }
 fs.rmSync(path.dirname(readyFile), { recursive: true, force: true });
 
+// ---- a hostile handshake is exit 3, because nothing was dispatched ---------
+
+for (const [mode, label] of [
+  ['initialize-no-protocol', 'an initialize result with no protocolVersion'],
+  ['initialize-numeric-protocol', 'an initialize result whose protocolVersion is a number'],
+  ['initialize-both', 'an initialize reply with both a result and an error'],
+  ['initialize-bad-error-code', 'an initialize error whose code is not an integer'],
+  ['initialize-error', 'an initialize error the bridge actually meant'],
+]) {
+  check(`${label} is transport, not unknown`,
+    run(['call', 'navigate', '{}'], { mode, timeoutSeconds: 2 }).status, 3);
+}
+
+// Nothing may go out before the handshake is accepted, so a rejected handshake
+// must leave the request unsent rather than racing it.
+const handshakeCapture = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'cic-hs-')), 'captured.jsonl');
+run(['call', 'navigate', '{}'], {
+  mode: 'initialize-no-protocol',
+  env: { CIC_STUB_CAPTURE: handshakeCapture },
+  timeoutSeconds: 2,
+});
+const handshakeSeen = fs.readFileSync(handshakeCapture, 'utf8').trim().split('\n')
+  .filter(Boolean).map((line) => JSON.parse(line));
+check('a malformed handshake never dispatches the request',
+  handshakeSeen.some((message) => message.method === 'tools/call'), false);
+
+// ---- error and result members are validated, not just their containers -----
+
+check('an error code that is not an integer is unknown',
+  run(['call', 'navigate', '{}'], { mode: 'noninteger-error-code', timeoutSeconds: 2 }).status, 2);
+check('an isError that is not a boolean is unknown',
+  run(['call', 'navigate', '{}'], { mode: 'nonboolean-is-error', timeoutSeconds: 2 }).status, 2);
+check('a content part that is not an object is unknown',
+  run(['call', 'navigate', '{}'], { mode: 'content-part-not-object', timeoutSeconds: 2 }).status, 2);
+check('a content part with no type is unknown',
+  run(['call', 'navigate', '{}'], { mode: 'content-part-no-type', timeoutSeconds: 2 }).status, 2);
+check('a text part whose text is missing is unknown',
+  run(['call', 'navigate', '{}'], { mode: 'text-part-without-text', timeoutSeconds: 2 }).status, 2);
+check('a tool with no name is unknown',
+  run(['list'], { mode: 'tool-without-name', timeoutSeconds: 2 }).status, 2);
+check('a tools entry that is not an object is unknown',
+  run(['list'], { mode: 'tool-entry-not-object', timeoutSeconds: 2 }).status, 2);
+
+// ---- the two output modes must never disagree ------------------------------
+
+// A difference between plain and --json for the same reply is a bug in the
+// contract, not a formatting choice: a caller that switches to --json for
+// machine parsing would silently change which replies it treats as failures.
+const CALL_MODES = [
+  'ok', 'tool-error', 'is-error', 'no-result', 'null-reply', 'no-envelope',
+  'numeric-error-message', 'result-and-error', 'empty-result', 'empty-content',
+  'noninteger-error-code', 'nonboolean-is-error', 'content-part-not-object',
+  'content-part-no-type', 'text-part-without-text', 'malformed', 'exit-early',
+  'initialize-no-protocol', 'initialize-both', 'initialize-error',
+];
+for (const mode of CALL_MODES) {
+  const plain = run(['call', 'navigate', '{}'], { mode, timeoutSeconds: 2 });
+  const asJson = run(['call', 'navigate', '{}', '--json'], { mode, timeoutSeconds: 2 });
+  check(`plain and --json agree on call '${mode}' (${plain.status})`, plain.status, asJson.status);
+}
+for (const mode of ['ok', 'empty-result', 'tool-without-name', 'tool-entry-not-object', 'no-envelope']) {
+  const plain = run(['list'], { mode, timeoutSeconds: 2 });
+  const asJson = run(['list', '--json'], { mode, timeoutSeconds: 2 });
+  check(`plain and --json agree on list '${mode}' (${plain.status})`, plain.status, asJson.status);
+}
+
+// Every non-zero exit under --json owes the caller an envelope, with a string
+// message, whatever went wrong.
+for (const mode of CALL_MODES) {
+  const asJson = run(['call', 'navigate', '{}', '--json'], { mode, timeoutSeconds: 2 });
+  if (asJson.status === 0) { continue; }
+  const parsed = jsonLine(asJson);
+  check(`--json emits a well-formed envelope for '${mode}'`,
+    Boolean(parsed && parsed.error === true && typeof parsed.message === 'string'
+      && parsed.exit === asJson.status && typeof parsed.kind === 'string'),
+    true);
+}
+
 console.log(failures ? `\n${failures} failed` : '\nall passed');
 process.exit(failures ? 1 : 0);

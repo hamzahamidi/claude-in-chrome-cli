@@ -51,6 +51,28 @@ function replyTo(message) {
 
   if (method === 'initialize') {
     if (mode === 'no-initialize-reply') { return; }
+    // Hostile handshakes. Each is pre-dispatch, so each must be exit 3: the
+    // request never goes out, so the browser cannot have acted.
+    if (mode === 'initialize-no-protocol') {
+      send({ jsonrpc: '2.0', id, result: { capabilities: {}, serverInfo: { name: 's', version: '0' } } });
+      return;
+    }
+    if (mode === 'initialize-numeric-protocol') {
+      send({ jsonrpc: '2.0', id, result: { protocolVersion: 20241105, capabilities: {} } });
+      return;
+    }
+    if (mode === 'initialize-both') {
+      send({ jsonrpc: '2.0', id, result: { protocolVersion: protocolVersion }, error: { code: -1, message: 'both' } });
+      return;
+    }
+    if (mode === 'initialize-bad-error-code') {
+      send({ jsonrpc: '2.0', id, error: { code: 'not-an-integer', message: 'refused' } });
+      return;
+    }
+    if (mode === 'initialize-error') {
+      send({ jsonrpc: '2.0', id, error: { code: -32000, message: 'handshake refused' } });
+      return;
+    }
     send(initializeResult(id));
     return;
   }
@@ -146,6 +168,47 @@ function replyTo(message) {
   // content must not be confused with a reply that never got filled in.
   if (mode === 'empty-content') {
     send({ jsonrpc: '2.0', id, result: { content: [] } });
+    return;
+  }
+
+  // An error code that is a number but not an integer. JSON-RPC requires an
+  // integer, and 1.5 means nothing to a caller branching on it.
+  if (mode === 'noninteger-error-code') {
+    send({ jsonrpc: '2.0', id, error: { code: 1.5, message: 'fractional code' } });
+    return;
+  }
+
+  // isError decides the exit code, so a non-boolean would make success depend
+  // on JavaScript truthiness rather than on what the tool said.
+  if (mode === 'nonboolean-is-error') {
+    send({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: 'ambiguous' }], isError: 'yes' } });
+    return;
+  }
+
+  // Members of the arrays, which used to be free to be anything once the array
+  // itself existed. The plain and --json paths disagreed about these.
+  if (mode === 'content-part-not-object') {
+    send({ jsonrpc: '2.0', id, result: { content: ['just a string'] } });
+    return;
+  }
+
+  if (mode === 'content-part-no-type') {
+    send({ jsonrpc: '2.0', id, result: { content: [{ text: 'typeless' }] } });
+    return;
+  }
+
+  if (mode === 'text-part-without-text') {
+    send({ jsonrpc: '2.0', id, result: { content: [{ type: 'text' }] } });
+    return;
+  }
+
+  if (mode === 'tool-without-name') {
+    send({ jsonrpc: '2.0', id, result: { tools: [{ description: 'nameless' }] } });
+    return;
+  }
+
+  if (mode === 'tool-entry-not-object') {
+    send({ jsonrpc: '2.0', id, result: { tools: ['navigate'] } });
     return;
   }
 

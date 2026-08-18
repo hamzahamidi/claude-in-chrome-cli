@@ -9,7 +9,7 @@
 
 const { spawn } = require('child_process');
 
-const VERSION = '0.4.0';
+const VERSION = '0.4.1';
 const CLIENT_PROTOCOL = '2024-11-05';
 // Versions whose handshake this client understands. A server answering with
 // anything else has not agreed a protocol, so the request is never sent.
@@ -120,14 +120,76 @@ const textOf = (result) => (result.content || [])
 
 const isPlainObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
 
+/** JSON-RPC requires the code to be an integer, and MCP the message a string. */
+function describeBadError(error) {
+  if (!isPlainObject(error)) { return 'an error that is not an object'; }
+  // An integer, not merely a number: 1.5 and NaN are not JSON-RPC error codes,
+  // and accepting them means passing something meaningless to a caller
+  // deciding what to do next.
+  if (!Number.isInteger(error.code)) { return 'an error whose code is not an integer'; }
+  if (typeof error.message !== 'string') { return 'an error whose message is not a string'; }
+  return null;
+}
+
+/**
+ * Describes what is wrong with a result for the method that asked for it.
+ *
+ * Each method promises one shape. Checking only that the outer array exists
+ * left its members free to be anything, and the plain and --json paths then
+ * disagreed about them: plain printed `undefined` for a text part with no text
+ * while --json passed the same part through as a success.
+ */
+function describeBadResult(result, method) {
+  if (!isPlainObject(result)) { return 'a result that is not an object'; }
+
+  if (method === 'initialize') {
+    if (typeof result.protocolVersion !== 'string') {
+      return 'an initialize result whose protocolVersion is not a string';
+    }
+    return null;
+  }
+
+  if (method === 'tools/list') {
+    if (!Array.isArray(result.tools)) { return 'a tools/list result without a tools array'; }
+    for (const tool of result.tools) {
+      if (!isPlainObject(tool)) { return 'a tools/list result holding an entry that is not an object'; }
+      if (typeof tool.name !== 'string' || tool.name === '') {
+        return 'a tools/list result holding a tool without a name';
+      }
+      if (tool.description !== undefined && typeof tool.description !== 'string') {
+        return 'a tools/list result holding a tool whose description is not a string';
+      }
+    }
+    return null;
+  }
+
+  if (!Array.isArray(result.content)) { return 'a tools/call result without a content array'; }
+  // isError decides the exit code, so a non-boolean here would make the
+  // difference between success and failure depend on JavaScript truthiness.
+  if (result.isError !== undefined && typeof result.isError !== 'boolean') {
+    return 'a tools/call result whose isError is not a boolean';
+  }
+  for (const part of result.content) {
+    if (!isPlainObject(part)) { return 'a tools/call result holding a content part that is not an object'; }
+    if (typeof part.type !== 'string' || part.type === '') {
+      return 'a tools/call result holding a content part without a type';
+    }
+    if (part.type === 'text' && typeof part.text !== 'string') {
+      return 'a tools/call result holding a text part whose text is not a string';
+    }
+  }
+  return null;
+}
+
 /**
  * Describes what is wrong with a reply, or returns null when it is usable.
  *
- * A reply that parsed and carries the right id is still not an answer. The
- * checks below are the whole reason the exit codes mean anything: an error
- * whose message is a number would have gone straight into the frozen envelope
- * as a number, and a result missing its required array would have printed
- * nothing and exited 0. Post-dispatch, unusable is exit 2, never a guess.
+ * A reply that parsed and carries the right id is still not an answer. These
+ * checks are the whole reason the exit codes mean anything: an error whose
+ * message is a number would have gone straight into the frozen envelope as a
+ * number, and a result missing its required array would have printed nothing
+ * and exited 0. Every caller of this treats a description as unusable, so the
+ * two output modes cannot classify the same reply differently.
  */
 function describeBadReply(reply, method) {
   const hasResult = Object.prototype.hasOwnProperty.call(reply, 'result');
@@ -141,23 +203,10 @@ function describeBadReply(reply, method) {
       : 'replied without a result or an error';
   }
 
-  if (hasError) {
-    if (!isPlainObject(reply.error)) { return 'replied with an error that is not an object'; }
-    if (typeof reply.error.code !== 'number') { return 'replied with an error whose code is not a number'; }
-    if (typeof reply.error.message !== 'string') { return 'replied with an error whose message is not a string'; }
-    return null;
-  }
-
-  if (!isPlainObject(reply.result)) { return 'replied with a result that is not an object'; }
-  // The two methods this client calls each require one array. An empty array
-  // is a real answer; a missing one means the reply was never filled in.
-  if (method === 'tools/list' && !Array.isArray(reply.result.tools)) {
-    return 'replied to tools/list without a tools array';
-  }
-  if (method === 'tools/call' && !Array.isArray(reply.result.content)) {
-    return 'replied to tools/call without a content array';
-  }
-  return null;
+  const bad = hasError
+    ? describeBadError(reply.error)
+    : describeBadResult(reply.result, method);
+  return bad ? `replied with ${bad}` : null;
 }
 
 /**
@@ -400,11 +449,20 @@ async function main(ctx) {
   }, initializePromise);
   const initialized = await initializePromise;
 
+  // The handshake reply gets the same scrutiny as a tool reply. Everything here
+  // is still pre-dispatch, so a malformed one is exit 3: nothing was sent to
+  // the browser and nothing can have happened in it.
+  const badInitialize = describeBadReply(initialized, 'initialize');
+  if (badInitialize) {
+    throw new CicError(EXIT.TRANSPORT, `the bridge ${badInitialize} while initializing.`);
+  }
+
   if (initialized.error) {
     throw new CicError(EXIT.TRANSPORT,
       `the bridge refused the handshake: ${JSON.stringify(initialized.error)}`);
   }
-  const agreed = initialized.result && initialized.result.protocolVersion;
+  // Guaranteed a string by the check above.
+  const agreed = initialized.result.protocolVersion;
   if (!SUPPORTED_PROTOCOLS.has(agreed)) {
     throw new CicError(EXIT.TRANSPORT,
       `the bridge answered with unsupported protocol version ${JSON.stringify(agreed)}.`);
