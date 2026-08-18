@@ -1,19 +1,20 @@
 {
   "name": "claude-in-chrome-cli",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Call Claude in Chrome MCP tools from the shell. Drives your real, logged-in Chrome from scripts, cron jobs, and agents that cannot hold an MCP connection.",
   "bin": {
     "cic": "plugins/claude-in-chrome/bin/cic.js"
   },
   "files": [
     "plugins/claude-in-chrome/bin/cic.js",
-    "plugins/claude-in-chrome/lib/bridge-session.js"
+    "plugins/claude-in-chrome/lib/bridge-session.js",
+    "plugins/claude-in-chrome/lib/session-command.js"
   ],
   "engines": {
     "node": ">=22"
   },
   "scripts": {
-    "test": "node test/test_tabs_parser.js && sh test/test_tabs_mcp.sh && node test/test_bridge_session.js && node test/test_cic_cli.js",
+    "test": "node test/test_tabs_parser.js && sh test/test_tabs_mcp.sh && node test/test_bridge_session.js && node test/test_session_command.js && node test/test_cic_cli.js",
     "test:install": "sh test/test_plugin_install.sh",
     "test:coverage": "c8 --reporter=none npm test && npm run coverage:report",
     "coverage:report": "c8 report --check-coverage"

@@ -77,6 +77,33 @@ Exit codes are a contract, frozen from 0.4.0 onward:
 
 Only exit 3 is safe to retry automatically, which is the only thing `--retries` will retry. Exit 2 means the click, submit or script may already have run, so repeating it would be a second action rather than a second look at the first.
 
+### One connection, many calls
+
+A one-shot `cic call` pays for a process and a handshake every time, and its tab group starts empty. `cic session --jsonl` holds one connection open and answers one JSON object per line, so a `tabId` from an earlier call is still valid in a later one.
+
+```sh
+printf '%s\n' \
+  '{"id":1,"tool":"tabs_create_mcp"}' \
+  '{"id":2,"tool":"navigate","arguments":{"url":"https://example.com","tabId":123}}' \
+  '{"id":3,"tool":"get_page_text","arguments":{"tabId":123}}' \
+  | cic session --jsonl
+```
+
+| In | Out |
+| --- | --- |
+| `{"id":<any>,"tool":"<name>","arguments":{...},"timeout":<secs>}` | `{"id":<same>,"exit":0,"result":{...}}` |
+| | `{"id":<same>,"error":true,"kind":"...","exit":<code>,"message":"..."}` |
+
+The failure record is the same envelope `cic call --json` already emits, with the id added, so a caller that parses one parses both. `id` is yours: `cic` echoes it back and never invents one. `arguments` defaults to `{}` and `timeout` to the session's.
+
+Calls run one at a time, in the order given, and stdin is paused while one is in flight, so a fast producer cannot build an unbounded backlog. You own sequencing and any value you thread between calls; `cic` owns the connection and nothing else. There are no variables, captures or control flow here on purpose: your program already has those.
+
+Because a persistent process has one exit status and many calls, each record carries its own outcome and the **process** exit code describes only the session: `0` it shut down cleanly, `2` a call whose outcome was unknown ended it, `3` it never started.
+
+A malformed line is that line's problem: it gets a `usage` record and the session continues. A tool error is that call's problem, likewise. **An unknown outcome ends the session**, deliberately: the request was sent, nobody knows whether the browser acted, and letting a later call race it would be the one thing the exit codes exist to prevent. Start a fresh session.
+
+For driving it by hand, `cic shell` is the same connection with a prompt. One line is a tool name and optional JSON arguments, nothing is remembered between lines, and `.exit` or Ctrl-D leaves.
+
 ### Moving from `cic.sh`
 
 The shell script is gone as of 0.4.0. It exited 0 on tool errors, so pipelines carried on after a failure, and its `sleep`-based wait was a floor as well as a ceiling. Both are fixed in the Node client rather than patched in shell. The old script stays fetchable from the `v0.2.x` and `v0.3.x` tags.

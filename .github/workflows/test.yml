@@ -40,6 +40,8 @@ jobs:
         run: npx c8 --no-clean --reporter=none sh test/test_tabs_mcp.sh
       - name: BridgeSession dispatch flag and session reuse
         run: npx c8 --no-clean --reporter=none node test/test_bridge_session.js
+      - name: session and shell streaming interfaces
+        run: npx c8 --no-clean --reporter=none node test/test_session_command.js
       - name: cic contract, handshake ordering and retries
         run: npx c8 --no-clean --reporter=none node test/test_cic_cli.js
       - name: coverage report and floors

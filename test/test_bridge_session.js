@@ -78,9 +78,19 @@ async function main() {
   // Four listeners per request, never removed, is invisible in one-shot use and
   // fatal to the reuse this class exists for: twelve calls reached thirteen
   // data listeners and Node began warning about a probable leak.
+  // The assertion is growth, not an absolute count. With one reader for the
+  // session there is exactly one listener set attached at open() and it stays
+  // for the session's life, so demanding zero would only be true of the old
+  // per-request design. What must never change is that the count is independent
+  // of how many calls have been made.
   {
     const s = session('ok');
     await s.open();
+    const before = {
+      data: s.child.stdout.listenerCount('data'),
+      exit: s.child.listenerCount('exit'),
+      error: s.child.listenerCount('error'),
+    };
     const CALLS = 12;
     let allSucceeded = true;
     for (let i = 0; i < CALLS; i++) {
@@ -88,9 +98,12 @@ async function main() {
       if (!reply.result || !Array.isArray(reply.result.content)) { allSucceeded = false; }
     }
     check(`${CALLS} sequential calls on one session all answer`, allSucceeded, true);
-    check('stdout data listeners do not accumulate', s.child.stdout.listenerCount('data'), 0);
-    check('child exit listeners do not accumulate', s.child.listenerCount('exit'), 0);
-    check('child error listeners do not accumulate', s.child.listenerCount('error'), 0);
+    check('stdout data listeners do not grow with calls', s.child.stdout.listenerCount('data'), before.data);
+    check('child exit listeners do not grow with calls', s.child.listenerCount('exit'), before.exit);
+    check('child error listeners do not grow with calls', s.child.listenerCount('error'), before.error);
+    check('and one reader serves the whole session', before.data, 1);
+    // Every waiter is removed as it settles, so nothing is left holding ids.
+    check('no waiters outlive their calls', s.waiters.size, 0);
     await s.close();
   }
 

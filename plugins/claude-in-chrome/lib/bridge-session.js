@@ -132,11 +132,19 @@ class BridgeSession {
       : ['--claude-in-chrome-mcp']);
     this.timeoutSeconds = timeoutSeconds;
     this.child = null;
-    // Set the moment a request write resolves, and never cleared. Everything
-    // after it is post-dispatch, whatever else goes wrong.
+    // True once any request has been written. A one-shot caller reads this to
+    // classify a failure; a long-lived session classifies per call instead,
+    // from the waiter's own `sent` flag, because one unknown outcome must not
+    // relabel every later call.
     this.dispatched = false;
     this.nextId = 1;
     this.closed = false;
+    // id -> waiter. One reader serves all of them: a reader per request dropped
+    // whatever arrived between requests, which serialized one-shot use never
+    // noticed and a streaming session would have.
+    this.waiters = new Map();
+    this.readBuffer = '';
+    this.readerAttached = false;
   }
 
   /** Spawn the child and complete initialization, or throw with dispatched false. */
@@ -146,6 +154,7 @@ class BridgeSession {
     } catch (failure) {
       throw new BridgeError(`could not start ${this.binary}: ${failure.message}`, { handshake: true });
     }
+    this.#attachReader();
 
     const id = this.nextId++;
     const pending = this.#awaitReply(id, this.timeoutSeconds);
@@ -156,7 +165,7 @@ class BridgeSession {
       jsonrpc: '2.0', id, method: 'initialize',
       params: {
         protocolVersion: CLIENT_PROTOCOL, capabilities: {},
-        clientInfo: { name: 'cic', version: this.clientVersion || '0.5.0' },
+        clientInfo: { name: 'cic', version: this.clientVersion || '0.6.0' },
       },
     }, pending);
     const initialized = await pending;
@@ -189,18 +198,21 @@ class BridgeSession {
    * behaviour even though ids are already allocated per request.
    */
   async call(method, params, { timeoutSeconds } = {}) {
+    if (this.closed) { throw new BridgeError('the session is closed.', { handshake: true }); }
     const id = this.nextId++;
     const pending = this.#awaitReply(id, timeoutSeconds || this.timeoutSeconds);
     pending.catch(() => {});
-    // Set before the write, not after it. Waiting for the write callback left a
-    // window where the child had already received the request and replied, or
-    // died, while this still said nothing was dispatched: the failure was then
-    // classified exit 3 and --retries would repeat an action that had already
-    // run. Once the bytes are handed to the pipe the outcome is unknowable, so
-    // the flag has to lead the write rather than follow it. A write that then
-    // fails outright is still counted as dispatched, because a broken pipe does
-    // not prove nothing arrived, and guessing wrong in that direction is the
-    // only guess that can repeat a click.
+    // Marked sent before the write, not after it. Waiting for the write callback
+    // left a window where the child had already received the request and
+    // replied, or died, while this still said nothing was dispatched: the
+    // failure was then classified exit 3 and --retries would repeat an action
+    // that had already run. Once the bytes are handed to the pipe the outcome is
+    // unknowable, so the flag has to lead the write rather than follow it. A
+    // write that then fails outright still counts as sent, because a broken pipe
+    // does not prove nothing arrived, and of the two ways to guess wrong only
+    // that one can repeat a click.
+    const waiter = this.waiters.get(id);
+    if (waiter) { waiter.sent = true; }
     this.dispatched = true;
     await this.#send({ jsonrpc: '2.0', id, method, params }, pending);
 
@@ -278,83 +290,87 @@ class BridgeSession {
     }
   }
 
+  /**
+   * One reader for the whole session, attached at open(). Each request registers
+   * a waiter under its id; this dispatches lines to them. A reader per request
+   * meant bytes arriving between requests were dropped, which serialized
+   * one-shot use never noticed and a streaming session would have.
+   */
+  #attachReader() {
+    if (this.readerAttached) { return; }
+    this.readerAttached = true;
+    const child = this.child;
+
+    const onLine = (line) => {
+      let message;
+      try { message = JSON.parse(line); } catch { return; }
+      // Valid JSON is not necessarily a message: `null`, a number and an array
+      // all parse, and dereferencing them threw an uncaught TypeError straight
+      // out of this handler. Anything that is not an object is log noise.
+      if (!isPlainObject(message)) { return; }
+      const waiter = this.waiters.get(message.id);
+      // A reply nobody is waiting for is not an error: a late answer to a call
+      // that already timed out has nowhere to go, and dropping it is right.
+      if (!waiter) { return; }
+      if (message.jsonrpc !== '2.0') {
+        waiter.fail(`replied to request ${message.id} without a JSON-RPC 2.0 envelope, so the outcome is unknown.`);
+        return;
+      }
+      waiter.settle(message);
+    };
+
+    const consume = (text, isFinal) => {
+      this.readBuffer += text;
+      let index;
+      while ((index = this.readBuffer.indexOf('\n')) !== -1) {
+        const line = this.readBuffer.slice(0, index).trim();
+        this.readBuffer = this.readBuffer.slice(index + 1);
+        if (line) { onLine(line); }
+      }
+      if (isFinal && this.readBuffer.trim()) {
+        onLine(this.readBuffer.trim());
+        this.readBuffer = '';
+      }
+    };
+
+    // A child that dies fails every outstanding call, each classified by
+    // whether its own request had been written.
+    const failAll = (message) => {
+      for (const waiter of [...this.waiters.values()]) { waiter.fail(message); }
+    };
+
+    child.stdout.on('data', (chunk) => consume(String(chunk), false));
+    child.stdout.on('end', () => consume('', true));
+    child.on('exit', (code) => {
+      // Let the final stdout chunk land before calling this no reply.
+      setImmediate(() => failAll(`the bridge exited (code ${code}) before a usable reply arrived.`));
+    });
+    child.on('error', (error) => failAll(`bridge failed: ${error.message}`));
+  }
+
   /** Resolves once the reply to `id` arrives, or rejects with a BridgeError. */
   #awaitReply(id, timeoutSeconds) {
-    const child = this.child;
-    const wasDispatched = () => this.dispatched;
     return new Promise((resolve, reject) => {
-      let buffer = '';
-      let settled = false;
-
-      // Every listener below is per-request and must come off on settlement.
-      // Leaving them attached leaked four per call, which one-shot use never
-      // noticed but a reused session does: twelve sequential calls reached
-      // thirteen data listeners and Node started emitting
-      // MaxListenersExceededWarning. Reuse across calls is the entire reason
-      // this class exists, so the cleanup is part of the contract, not tidiness.
-      const finish = (fn, value) => {
-        if (settled) { return; }
-        settled = true;
-        clearTimeout(timer);
-        child.stdout.removeListener('data', onData);
-        child.stdout.removeListener('end', onEnd);
-        child.removeListener('exit', onExit);
-        child.removeListener('error', onError);
-        fn(value);
+      const done = () => {
+        clearTimeout(waiter.timer);
+        this.waiters.delete(id);
       };
-
-      const fail = (message) => finish(reject, new BridgeError(message, {
-        dispatched: wasDispatched(), handshake: !wasDispatched(),
-      }));
-
-      const onLine = (line) => {
-        let message;
-        try { message = JSON.parse(line); } catch { return; }
-        // Valid JSON is not necessarily a message: `null`, a number and an
-        // array all parse, and dereferencing them threw an uncaught TypeError
-        // out of this stream handler. Anything not an object is log noise.
-        if (!isPlainObject(message)) { return; }
-        if (message.id !== id) { return; }
-        // Addressed to us, but not in an envelope the protocol defines.
-        if (message.jsonrpc !== '2.0') {
-          fail(`replied to request ${id} without a JSON-RPC 2.0 envelope, so the outcome is unknown.`);
-          return;
-        }
-        finish(resolve, message);
+      const waiter = {
+        // Whether this particular request reached the pipe. Per waiter rather
+        // than per session: in a long-lived session one unknown outcome must not
+        // relabel the classification of every later call.
+        sent: false,
+        timer: null,
+        settle: (message) => { done(); resolve(message); },
+        fail: (message) => {
+          done();
+          reject(new BridgeError(message, { dispatched: waiter.sent, handshake: !waiter.sent }));
+        },
       };
-
-      // A line-oriented reader that also flushes what is left when the stream
-      // ends: a reply split across chunks by a child that exits immediately
-      // afterwards would otherwise read as no reply at all.
-      const consume = (text, isFinal) => {
-        buffer += text;
-        let index;
-        while ((index = buffer.indexOf('\n')) !== -1) {
-          const line = buffer.slice(0, index).trim();
-          buffer = buffer.slice(index + 1);
-          if (line) { onLine(line); }
-        }
-        if (isFinal && buffer.trim()) { onLine(buffer.trim()); }
-      };
-
-      const timer = setTimeout(() => {
-        fail(`no reply within ${timeoutSeconds}s. Raise --timeout, or check that the Claude in Chrome extension is connected.`);
+      waiter.timer = setTimeout(() => {
+        waiter.fail(`no reply within ${timeoutSeconds}s. Raise --timeout, or check that the Claude in Chrome extension is connected.`);
       }, timeoutSeconds * 1000);
-
-      // Named so finish() can detach exactly these, rather than every listener
-      // on a child that later requests will also be watching.
-      const onData = (chunk) => consume(String(chunk), false);
-      const onEnd = () => consume('', true);
-      const onExit = (code) => {
-        // Let the final stdout chunk land before calling this no reply.
-        setImmediate(() => fail(`the bridge exited (code ${code}) before a usable reply arrived.`));
-      };
-      const onError = (error) => fail(`bridge failed: ${error.message}`);
-
-      child.stdout.on('data', onData);
-      child.stdout.on('end', onEnd);
-      child.on('exit', onExit);
-      child.on('error', onError);
+      this.waiters.set(id, waiter);
     });
   }
 }

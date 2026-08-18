@@ -11,8 +11,9 @@
 'use strict';
 
 const { BridgeSession, BridgeError } = require('../lib/bridge-session.js');
+const { runSession, runShell } = require('../lib/session-command.js');
 
-const VERSION = '0.5.0';
+const VERSION = '0.6.0';
 const DEFAULT_TIMEOUT_SECONDS = 30;
 // Backoff between retries. Only exit-3 failures are retried, and those fail
 // fast, so this stays short enough to be worth doing inside one command.
@@ -36,6 +37,8 @@ const USAGE = `cic - call Claude in Chrome MCP tools from the shell.
 Usage:
   cic list                          list available tools
   cic call <tool> [json-args]       call a tool, arguments default to {}
+  cic session --jsonl               many calls over one connection, one JSON object per line
+  cic shell                         the same connection, driven by hand
 
 Options:
   --timeout <secs>   ceiling on how long to wait for the reply (default ${DEFAULT_TIMEOUT_SECONDS})
@@ -50,6 +53,19 @@ Examples:
   cic call get_page_text '{}' --timeout 60
   cic call computer '{"action":"screenshot"}' --json
   cic call navigate '{"url":"https://example.com"}' --retries 3
+  echo '{"id":1,"tool":"tabs_create_mcp"}' | cic session --jsonl
+  cic shell
+
+One connection, many calls:
+  cic session --jsonl reads one JSON object per line and writes one per call.
+    in:   {"id":<any>,"tool":"<name>","arguments":{...},"timeout":<secs>}
+    out:  {"id":<same>,"exit":0,"result":{...}}
+          {"id":<same>,"error":true,"kind":"...","exit":<code>,"message":"..."}
+  Calls run one at a time, in order. Each record carries its own outcome, so the
+  process exit code describes only the session: 0 clean, 2 a call whose outcome
+  was unknown ended it, 3 it never started. An unknown outcome is fatal by
+  design: the request was sent, nobody knows if the browser acted, and a later
+  call must not race it.
 
 Exit codes:
   0   success
@@ -119,7 +135,7 @@ const textOf = (result) => (result.content || [])
 const sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
 
 function parseArguments(argv) {
-  const options = { timeout: DEFAULT_TIMEOUT_SECONDS, retries: 0, json: false };
+  const options = { timeout: DEFAULT_TIMEOUT_SECONDS, retries: 0, json: false, jsonl: false };
   const positional = [];
   // Scanning continues past the first mistake so that `--json` is still seen,
   // and a --json caller gets the error envelope rather than a bare exit code.
@@ -140,6 +156,7 @@ function parseArguments(argv) {
   for (let i = 0; i < argv.length; i++) {
     const argument = argv[i];
     if (argument === '--json') { options.json = true; }
+    else if (argument === '--jsonl') { options.jsonl = true; }
     else if (argument === '-h' || argument === '--help') { options.help = true; }
     else if (argument === '-v' || argument === '--version') { options.version = true; }
     else if (argument === '--timeout') {
@@ -175,7 +192,7 @@ function parseArguments(argv) {
 function planRequest(positional) {
   const [command, toolName, rawArguments, ...extra] = positional;
   if (command !== 'list' && command !== 'call') {
-    throw new UsageError(`unknown command '${command}'. Expected 'list' or 'call'.`);
+    throw new UsageError(`unknown command '${command}'. Expected 'list', 'call', 'session' or 'shell'.`);
   }
 
   if (command === 'list') {
@@ -224,6 +241,33 @@ async function main() {
 
   if (options.version) { await writeOut(VERSION + '\n'); return EXIT.OK; }
   if (options.help || positional.length === 0) { await writeOut(USAGE + '\n'); return EXIT.OK; }
+
+  // The streaming commands own their own loop and their own exit meaning, so
+  // they return before any of the one-shot machinery below.
+  if (positional[0] === 'session') {
+    if (positional.length > 1) {
+      throw new UsageError(`session takes no positional arguments, got '${positional[1]}'.`);
+    }
+    if (!options.jsonl) {
+      throw new UsageError('session needs --jsonl. It is the only protocol it speaks.');
+    }
+    return runSession({
+      timeoutSeconds: options.timeout,
+      input: process.stdin,
+      output: process.stdout,
+      jsonl: true,
+    });
+  }
+  if (positional[0] === 'shell') {
+    if (positional.length > 1) {
+      throw new UsageError(`shell takes no positional arguments, got '${positional[1]}'.`);
+    }
+    return runShell({
+      timeoutSeconds: options.timeout,
+      input: process.stdin,
+      output: process.stdout,
+    });
+  }
 
   const plan = planRequest(positional);
 
