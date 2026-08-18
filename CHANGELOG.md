@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.3.0 (unreleased)
+## 0.3.0 (2026-08-18)
 
 Adds `list_open_tabs`, a second MCP server, `chrome-tabs`, that reads Chrome and Chromium session data from disk. The extension bridge only ever sees tabs inside its own tab group; this answers "what is open" without a debugging port, an extension or a group, across every window and every readable profile on the machine, while reporting profiles it cannot read instead of counting them as empty.
 
