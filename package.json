@@ -13,7 +13,9 @@
   },
   "scripts": {
     "test": "node test/test_tabs_parser.js && sh test/test_tabs_mcp.sh && node test/test_cic_cli.js",
-    "test:install": "sh test/test_plugin_install.sh"
+    "test:install": "sh test/test_plugin_install.sh",
+    "test:coverage": "c8 --reporter=none npm test && npm run coverage:report",
+    "coverage:report": "c8 report --check-coverage"
   },
   "repository": {
     "type": "git",
@@ -34,5 +36,8 @@
     "claude-in-chrome",
     "mcp",
     "cli"
-  ]
+  ],
+  "devDependencies": {
+    "c8": "^12.0.0"
+  }
 }

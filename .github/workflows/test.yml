@@ -5,34 +5,93 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+          cache: npm
+      - name: install dev dependencies
+        run: npm ci
       - name: install the claude CLI, for the plugin install test
         run: npm install -g @anthropic-ai/claude-code
+      # One c8 invocation per suite, so a failure names the suite that failed.
+      # --reporter=none defers reporting to the step below: c8 otherwise prints
+      # threshold errors from a partial run, which reads as a coverage
+      # regression when the real problem is a failing test.
       - name: chrome-tabs SNSS parser
-        run: node test/test_tabs_parser.js
+        run: npx c8 --reporter=none node test/test_tabs_parser.js
       - name: chrome-tabs MCP handshake
-        run: sh test/test_tabs_mcp.sh
+        run: npx c8 --no-clean --reporter=none sh test/test_tabs_mcp.sh
       - name: cic exit-code contract and handshake ordering
-        run: node test/test_cic_cli.js
+        run: npx c8 --no-clean --reporter=none node test/test_cic_cli.js
+      - name: coverage report and floors
+        run: npx c8 report --check-coverage
       - name: every version constant matches plugin.json
         run: |
           plugin_version=$(node -p "require('./plugins/claude-in-chrome/.claude-plugin/plugin.json').version")
           server_version=$(node -p "require('./plugins/claude-in-chrome/tabs_mcp.js').SERVER_VERSION")
           package_version=$(node -p "require('./package.json').version")
           cli_version=$(node plugins/claude-in-chrome/bin/cic.js --version)
+          lock_version=$(node -p "require('./package-lock.json').packages[''].version")
           echo "plugin.json: $plugin_version"
           echo "tabs_mcp.js: $server_version"
           echo "package.json: $package_version"
           echo "bin/cic.js: $cli_version"
+          echo "package-lock.json: $lock_version"
           test "$plugin_version" = "$server_version"
           test "$plugin_version" = "$package_version"
           test "$plugin_version" = "$cli_version"
+          test "$plugin_version" = "$lock_version"
       - name: both install paths carry a working cic
         run: sh test/test_plugin_install.sh
+      # Kept even when something above failed: a red run is exactly when the
+      # coverage diff is worth having, and the report is already written by then.
+      - name: keep the coverage report
+        if: always() && hashFiles('coverage/lcov.info') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage/lcov.info
+          retention-days: 7
+
+  # A separate job for one reason: id-token: write mints an OIDC token asserting
+  # this repository's identity, and the job above installs and runs third-party
+  # code (the claude CLI, its postinstall, plugins it fetches). Any step in a job
+  # can request that token, so it does not belong in the same job. This one runs
+  # nothing but the upload.
+  coverage:
+    needs: test
+    if: always() && (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        id: report
+        continue-on-error: true
+        with:
+          name: coverage
+          path: coverage
+      - name: upload coverage to Codecov
+        if: steps.report.outcome == 'success'
+        uses: codecov/codecov-action@v7
+        with:
+          use_oidc: true
+          files: ./coverage/lcov.info
+          # Pinned: the action defaults to fetching the latest CLI, so an
+          # upstream release could otherwise turn every pull request red.
+          version: v11.3.1
+          # Never soften this. An upload step that cannot fail reports success
+          # while every upload is rejected, and nobody notices for weeks.
+          fail_ci_if_error: true
