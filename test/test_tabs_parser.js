@@ -18,6 +18,7 @@ const {
   updateTabNavigation,
   setSelectedNavigationIndex,
   rawRecord,
+  initialStateMarker,
   buildSession,
 } = require('./fixtures/build_snss.js');
 const {
@@ -164,16 +165,38 @@ check('a selection command pointing at a missing index falls back to the highest
   assert.deepStrictEqual(tabs, [{ tab_id: 101, window_id: 1, url: 'https://b.example/', title: 'B' }]);
 });
 
-check('a record whose declared size overruns the file is reported as truncated, not thrown', () => {
+check('a record whose declared size overruns the file, after the marker, is truncated but still trusted', () => {
   withSessionFile([setTabWindow(1, 101), updateTabNavigation(101, 0, 'https://kept.example/', 'Kept')], (file) => {
-    fs.writeFileSync(file, fs.readFileSync(file).subarray(0, -1));
+    // The marker is already in the file (buildSession's default); append a
+    // record whose declared size promises more bytes than actually follow,
+    // simulating later, incremental data getting cut off mid-write.
+    const overrun = rawRecord(6, Buffer.alloc(50)).subarray(0, 3);
+    fs.writeFileSync(file, Buffer.concat([fs.readFileSync(file), overrun]));
     let result;
     assert.doesNotThrow(() => {
       result = parseSession(file);
     });
     assert.strictEqual(result.validMagic, true);
     assert.strictEqual(result.truncated, true);
+    assert.strictEqual(result.tabs[0].url, 'https://kept.example/');
   });
+});
+
+check('a record whose declared size overruns the file, with no marker ever written, is not trusted', () => {
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'snss-')), 'Session_1');
+  const noMarker = buildSession(
+    [setTabWindow(1, 101), updateTabNavigation(101, 0, 'https://kept.example/', 'Kept')],
+    3,
+    false
+  );
+  const overrun = rawRecord(6, Buffer.alloc(50)).subarray(0, 3);
+  fs.writeFileSync(file, Buffer.concat([noMarker, overrun]));
+  try {
+    const result = parseSession(file);
+    assert.strictEqual(result.validMagic, false);
+  } finally {
+    fs.rmSync(path.dirname(file), { recursive: true, force: true });
+  }
 });
 
 check('a clean file with zero records is a valid empty session, not truncated', () => {
@@ -219,8 +242,15 @@ check('an unrecognized version number fails closed rather than being guessed at'
   });
 });
 
-check('a file cut off between records (no room for even a length prefix) is truncated, not clean', () => {
+check('a file cut off between records with no marker ever written is not trusted (pre-marker truncation)', () => {
   const buf = readRecords(Buffer.concat([Buffer.from('SNSS', 'latin1'), Buffer.from([3, 0, 0, 0]), Buffer.from([0xab])]));
+  assert.strictEqual(buf.validMagic, false);
+});
+
+check('a file cut off between records after the marker was already written is truncated, not untrusted (post-marker truncation)', () => {
+  const buf = readRecords(
+    Buffer.concat([Buffer.from('SNSS', 'latin1'), Buffer.from([3, 0, 0, 0]), initialStateMarker(), Buffer.from([0xab])])
+  );
   assert.strictEqual(buf.validMagic, true);
   assert.strictEqual(buf.truncated, true);
 });

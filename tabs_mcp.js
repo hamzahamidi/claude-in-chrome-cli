@@ -33,11 +33,12 @@ const CMD_WINDOW_CLOSED = 17;
 // same rule rather than trusting a byte-complete file that never earned it.
 const CMD_INITIAL_STATE_MARKER = 255;
 
-// chromium/components/sessions/core/session_backend.cc kFileCurrentVersion.
-// 3 is the current cleartext format, confirmed against a real session file
-// on this machine. Version 5 is encrypted and unreadable by this parser
-// regardless; any version this parser has not confirmed is treated the same
-// way, fail closed, rather than assumed compatible.
+// chromium/components/sessions/core/command_storage_backend.cc
+// kFileVersionWithMarker. 3 is the current cleartext format, confirmed
+// against a real session file on this machine. kFileVersionEncryptedWithOSCrypt
+// (5) is encrypted and unreadable by this parser regardless; any version
+// this parser has not confirmed is treated the same way, fail closed,
+// rather than assumed compatible.
 const SNSS_CURRENT_VERSION = 3;
 
 // chromium/components/sessions/core/session_constants.cc. Chrome's staged
@@ -144,15 +145,19 @@ function aligned(n) {
 
 // SNSS is a magic + version header, then uint16-length-prefixed commands.
 // validMagic false means this is not a file this parser trusts, whether
-// because the magic is wrong, the version is one it has not confirmed, or a
-// byte-complete file never wrote CMD_INITIAL_STATE_MARKER, which Chromium
-// itself requires before treating a file as a valid, finished snapshot.
-// truncated true means it started as a version it understands but a
-// record's declared size ran past the end of the file, or the file ended
-// with leftover bytes too short to even hold a length prefix: either way, a
-// record was cut off mid-write. Records collected before that point are
-// still returned. The marker requirement only applies to a byte-complete
-// file: a truncated file is already known to be less than fully trusted.
+// because the magic is wrong, the version is one it has not confirmed, or
+// CMD_INITIAL_STATE_MARKER never appears among the records recovered.
+// Chromium writes that marker once, after its initial commands, and will
+// not use a file that lacks it, complete or not: a truncated write cuts
+// off before the marker is appended far more often than a byte-complete
+// write manages to finish every record but skip the marker, so truncation
+// must not excuse the requirement, only the reverse would be a coincidence.
+// truncated true means a record's declared size ran past the end of the
+// file, or the file ended with leftover bytes too short to even hold a
+// length prefix: either way, a record was cut off mid-write. When the
+// marker was already written before that cutoff, whatever is truncated is
+// later, incremental data appended after a genuinely valid initial
+// snapshot, and the records recovered before the cutoff are still returned.
 function readRecords(buf) {
   const records = [];
   if (buf.length < 8 || buf.toString('latin1', 0, 4) !== 'SNSS') {
@@ -162,17 +167,21 @@ function readRecords(buf) {
     return { records, validMagic: false, truncated: false };
   }
   let off = 8;
+  let truncated = false;
   while (off + 2 <= buf.length) {
     const size = buf.readUInt16LE(off);
     off += 2;
     if (size === 0 || off + size > buf.length) {
-      return { records, validMagic: true, truncated: true };
+      truncated = true;
+      break;
     }
     records.push([buf[off], buf.subarray(off + 1, off + size)]);
     off += size;
   }
-  const truncated = off < buf.length;
-  if (!truncated && !records.some(([cmd]) => cmd === CMD_INITIAL_STATE_MARKER)) {
+  if (!truncated && off < buf.length) {
+    truncated = true; // dangling bytes, too short for even a length prefix
+  }
+  if (!records.some(([cmd]) => cmd === CMD_INITIAL_STATE_MARKER)) {
     return { records, validMagic: false, truncated: false };
   }
   return { records, validMagic: true, truncated };
