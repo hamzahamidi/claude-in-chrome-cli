@@ -3,10 +3,19 @@
 # a one-line move cannot fail a build.
 #
 # The absolute floors in .c8rc.json are a coarse backstop for the same property,
-# not a second opinion about it. They sit below the measured 0.4.0 baseline
-# (94.95% of lines, 82.55% of branches) and exist so a local run fails too,
-# without waiting for Codecov. Neither number is an aspiration; raise them only
-# by measuring first.
+# not a second opinion about it. They sit just below the current measured
+# baseline (98% of lines, 88% of branches as of 0.7.0) and exist so a local run
+# fails too, without waiting for Codecov. Windows carries its own pair in
+# .github/workflows/test.yml, because it skips POSIX-only tests by design and
+# that moves both the numerator and the denominator.
+#
+# Neither number is an aspiration; raise them only by measuring first, and
+# measure without a browser profile present. collect() reads the real home
+# directory, so a machine with Chrome installed reaches paths a CI runner cannot,
+# and a floor taken from a laptop failed every POSIX leg in 0.7.0.
+#
+# Only plugins/claude-in-chrome is measured at all. Build tooling for the docs
+# assets is outside that glob on purpose and is not expected to be covered.
 coverage:
   status:
     project:

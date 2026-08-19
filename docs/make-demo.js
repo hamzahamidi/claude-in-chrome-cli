@@ -3,6 +3,10 @@
 // shell` session. Needs rsvg-convert and img2webp on PATH (brew install librsvg
 // webp) and writes its frames to a temporary directory.
 //
+// Build tooling for a documentation asset, run by hand and deliberately not
+// tested: it ships in neither the npm tarball nor the plugin, and coverage only
+// measures plugins/claude-in-chrome. Its output is checked by looking at it.
+//
 // The transcript below is a real session, captured by driving `cic shell`
 // through a pty so the recorded order is the interactive one. Two things are
 // changed from the capture and nothing else: each reply's tab context is elided,
