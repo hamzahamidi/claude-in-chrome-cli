@@ -110,6 +110,119 @@ function replyTo(message) {
     return;
   }
 
+  // The tab lifecycle. withTab needs three tools to answer differently within
+  // one session, which no single-reply mode can express, so these dispatch on
+  // the tool name. What the test reads back is the capture file: it is the only
+  // way to prove from outside whether the close actually happened, which is the
+  // behaviour the fail-closed rule is about.
+  if (mode.startsWith('tabs-')) {
+    const name = (message.params || {}).name;
+    const ok = (text) => send({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text }] } });
+    const refuse = (text) => send({
+      jsonrpc: '2.0', id, result: { content: [{ type: 'text', text }], isError: true },
+    });
+
+    // A JSON-RPC error, as opposed to a result carrying isError. Both mean the
+    // browser answered and said no, and reading `.result` without checking
+    // `.error` first made these throw a TypeError that surfaced as exit 3.
+    const rpcError = (message) => send({
+      jsonrpc: '2.0', id, error: { code: -32000, message },
+    });
+
+    if (name === 'tabs_create_mcp') {
+      if (mode === 'tabs-no-id') { ok('Created new tab.'); return; }
+      if (mode === 'tabs-create-error') { refuse('no tab available'); return; }
+      if (mode === 'tabs-create-rpc-error') { rpcError('create blew up'); return; }
+      ok('Created new tab. Tab ID: 4242');
+      return;
+    }
+    if (name === 'navigate') {
+      if (mode === 'tabs-navigate-error' || mode === 'tabs-navigate-and-close-error') {
+        refuse('that url is blocked');
+        return;
+      }
+      if (mode === 'tabs-navigate-rpc-error') { rpcError('navigate blew up'); return; }
+      ok('Navigated to the url');
+      return;
+    }
+    if (name === 'tabs_close_mcp') {
+      if (mode === 'tabs-close-error' || mode === 'tabs-navigate-and-close-error') {
+        refuse('that tab is gone already');
+        return;
+      }
+      if (mode === 'tabs-close-rpc-error') { rpcError('close blew up'); return; }
+      ok('Closed tab 4242. 0 tab(s) remain.');
+      return;
+    }
+    // Whatever the caller asked for inside the tab.
+    if (mode === 'tabs-body-unknown') { return; }
+    if (mode === 'tabs-body-error') { refuse('the body tool refused'); return; }
+    ok('body ran against tab 4242');
+    return;
+  }
+
+  // Image results, for --output. These are whole files rather than a magic
+  // header with filler after it: a header plus filler is exactly what an
+  // incomplete transfer produces, so using it as the valid fixture would have
+  // asserted the opposite of the guarantee.
+  if (mode.startsWith('image-')) {
+    const { PNG_1x1, JPEG, GIF, WEBP } = require('./fixtures/images.js');
+    const part = (extra) => ({ type: 'image', ...extra });
+    const reply = (content) => send({ jsonrpc: '2.0', id, result: { content } });
+
+    if (mode === 'image-png') {
+      reply([{ type: 'text', text: 'here is the shot' }, part({ data: PNG_1x1.toString('base64'), mimeType: 'image/png' })]);
+      return;
+    }
+    if (mode === 'image-unlabelled') { reply([part({ data: PNG_1x1.toString('base64') })]); return; }
+    if (mode === 'image-jpeg') { reply([part({ data: JPEG.toString('base64'), mimeType: 'image/jpeg' })]); return; }
+    if (mode === 'image-gif') { reply([part({ data: GIF.toString('base64') })]); return; }
+    if (mode === 'image-webp') { reply([part({ data: WEBP.toString('base64') })]); return; }
+    if (mode === 'image-jpeg-labelled-png') {
+      reply([part({ data: JPEG.toString('base64'), mimeType: 'image/png' })]);
+      return;
+    }
+    if (mode === 'image-truncated') {
+      // Base64 whose length is not a multiple of four: a cut-off encoding,
+      // which Node's decoder accepts without complaint.
+      reply([part({ data: PNG_1x1.toString('base64').slice(0, 41), mimeType: 'image/png' })]);
+      return;
+    }
+    if (mode === 'image-truncated-cleanly') {
+      // The harder case, and the one that got through. The image itself is cut
+      // short and then encoded properly, so the base64 is valid, its length
+      // divides by four and the PNG signature is intact. Only looking for the
+      // end of the format catches this.
+      reply([part({ data: PNG_1x1.subarray(0, PNG_1x1.length - 12).toString('base64'), mimeType: 'image/png' })]);
+      return;
+    }
+    if (mode === 'image-webp-short-riff') {
+      // RIFF states its own payload length; here it claims more than arrived.
+      const lying = Buffer.from(WEBP);
+      lying.writeUInt32LE(lying.length + 100, 4);
+      reply([part({ data: lying.toString('base64') })]);
+      return;
+    }
+    if (mode === 'image-not-base64') { reply([part({ data: 'not base64 at all!!', mimeType: 'image/png' })]); return; }
+    if (mode === 'image-no-data') { reply([part({ mimeType: 'image/png' })]); return; }
+    if (mode === 'image-garbage') {
+      reply([part({ data: Buffer.alloc(40, 3).toString('base64'), mimeType: 'image/png' })]);
+      return;
+    }
+    if (mode === 'image-two') {
+      reply([part({ data: PNG_1x1.toString('base64') }), part({ data: PNG_1x1.toString('base64') })]);
+      return;
+    }
+    if (mode === 'image-none') { reply([{ type: 'text', text: 'no picture here' }]); return; }
+    if (mode === 'image-is-error') {
+      send({
+        jsonrpc: '2.0', id,
+        result: { content: [{ type: 'text', text: 'the tool refused' }], isError: true },
+      });
+      return;
+    }
+  }
+
   if (mode === 'never-reply') { return; }
 
   // A result far larger than a pipe buffer. Truncation here is silent data

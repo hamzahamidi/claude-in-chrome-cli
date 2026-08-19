@@ -59,7 +59,10 @@ EXPECTED="./.claude-plugin/plugin.json
 ./LICENSE
 ./bin/cic.js
 ./lib/bridge-session.js
+./lib/image-output.js
 ./lib/session-command.js
+./lib/session-tabs.js
+./lib/tab-lifecycle.js
 ./skills/using-claude-in-chrome/SKILL.md
 ./tabs_mcp.js"
 ACTUAL="(cache directory missing)"

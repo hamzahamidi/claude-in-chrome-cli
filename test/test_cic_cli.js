@@ -460,6 +460,195 @@ check('--retries rejects a fraction',
 check('--retries does not swallow a following flag',
   run(['call', 'navigate', '{}', '--retries', '--json']).status, 64);
 
+// ---- cic tabs: no bridge in the middle ------------------------------------
+
+// A machine with no browser profile is the normal case on a CI runner, and it
+// is a valid answer rather than a failure: nothing found is reported and the
+// exit code stays 0. That is what makes these assertions portable.
+check('tabs succeeds whether or not this machine has a profile', run(['tabs']).status, 0);
+check('tabs --json emits one JSON object with a groups array',
+  Array.isArray(JSON.parse(run(['tabs', '--json']).stdout).groups), true);
+
+// The roadmap claim, made testable: reading session files must not need the
+// bridge. Pointing the binary at nothing that exists would be exit 3 for any
+// command that spawns it.
+check('tabs never spawns the bridge, so a missing binary cannot break it',
+  run(['tabs'], { env: { CIC_CLAUDE_BIN: '/nonexistent/claude' } }).status, 0);
+check('and neither does tabs --json',
+  run(['tabs', '--json'], { env: { CIC_CLAUDE_BIN: '/nonexistent/claude' } }).status, 0);
+
+check('tabs refuses flags that imply a bridge', run(['tabs', '--timeout', '5']).status, 64);
+check('tabs refuses --retries too', run(['tabs', '--retries', '2']).status, 64);
+check('tabs takes no positional argument', run(['tabs', 'extra']).status, 64);
+check('a profile that matches nothing is a usage error, not an empty answer',
+  run(['tabs', '--profile', 'NoSuchProfileName']).status, 64);
+
+// ---- cic with-tab ---------------------------------------------------------
+
+check('with-tab runs the body against the tab it made',
+  run(['with-tab', 'https://example.com', 'get_page_text'], { mode: 'tabs-ok' }).stdout.trim(),
+  'body ran against tab 4242');
+check('with-tab succeeds', run(['with-tab', 'https://example.com', 'get_page_text'], { mode: 'tabs-ok' }).status, 0);
+check('with-tab --keep-tab still succeeds',
+  run(['with-tab', 'https://example.com', 'get_page_text', '--keep-tab'], { mode: 'tabs-ok' }).status, 0);
+
+check('a tab the browser will not create is a tool error',
+  run(['with-tab', 'https://example.com', 'get_page_text'], { mode: 'tabs-create-error' }).status, 1);
+check('a navigation the browser refuses is a tool error',
+  run(['with-tab', 'https://example.com', 'get_page_text'], { mode: 'tabs-navigate-error' }).status, 1);
+
+// A lifecycle tool can answer with a JSON-RPC error rather than isError, and
+// both mean the browser answered and said no. Reading the result without
+// checking for an error first threw a TypeError, which arrived here as exit 3:
+// the class that promises the browser cannot have acted, and the only one
+// --retries repeats. A tab had already been created, so that promise was false.
+{
+  const created = run(['with-tab', 'https://example.com', 'get_page_text'], { mode: 'tabs-create-rpc-error' });
+  check('a create answering with a JSON-RPC error is a tool error', created.status, 1);
+  check('and reports the bridge message, not a TypeError',
+    /create blew up/.test(created.stderr), true);
+  check('and never says "Cannot read properties"',
+    /Cannot read properties/.test(created.stderr), false);
+
+  const moved = run(['with-tab', 'https://example.com', 'get_page_text'], { mode: 'tabs-navigate-rpc-error' });
+  check('a navigate answering with a JSON-RPC error is a tool error, never exit 3', moved.status, 1);
+  check('and reports the bridge message', /navigate blew up/.test(moved.stderr), true);
+
+  const closed = run(['with-tab', 'https://example.com', 'get_page_text'], { mode: 'tabs-close-rpc-error' });
+  check('a close answering with a JSON-RPC error still leaves the work successful', closed.status, 0);
+  check('and warns that the tab may still be open',
+    /tab 4242 may still be open: close blew up/.test(closed.stderr), true);
+}
+
+// A failure whose cleanup also failed must report both. Saying only why the
+// work failed, while its tab is still sitting there, hides the thing with-tab
+// exists to get right.
+{
+  const both = run(['with-tab', 'https://example.com', 'get_page_text'], { mode: 'tabs-navigate-and-close-error' });
+  check('a failed navigation whose cleanup also failed is still a tool error', both.status, 1);
+  check('and reports the navigation failure', /could not navigate/.test(both.stderr), true);
+  check('and appends the cleanup warning rather than dropping it',
+    /tab 4242 may still be open/.test(both.stderr), true);
+  const asJson = run(['with-tab', 'https://example.com', 'get_page_text', '--json'],
+    { mode: 'tabs-navigate-and-close-error' });
+  check('--json carries both in one envelope',
+    /could not navigate/.test(asJson.stdout) && /may still be open/.test(asJson.stdout), true);
+}
+// Exit 2, not 3 and not 1: a tab really was created and the reply did not say
+// which one, so a tab exists that nobody can address. Exit 3 would promise the
+// browser never acted, and it is the class --retries repeats, which here would
+// leave a fresh orphan tab behind on every attempt.
+const nameless = run(['with-tab', 'https://example.com', 'get_page_text'], { mode: 'tabs-no-id' });
+check('a create reply carrying no tab id is an unknown outcome', nameless.status, 2);
+check('and is not retried into a second orphan tab',
+  run(['with-tab', 'https://example.com', 'get_page_text', '--retries', '3'],
+    { mode: 'tabs-no-id' }).status, 2);
+
+// The fail-closed case, end to end: exit 2, and the id of the tab that was
+// deliberately left behind, because someone has to go and look at it.
+const stranded = run(['with-tab', 'https://example.com', 'computer'], {
+  mode: 'tabs-body-unknown', timeoutSeconds: 1,
+});
+check('an unknown outcome inside with-tab is exit 2', stranded.status, 2);
+check('and it says which tab was left open', /Tab 4242 was left open on purpose/.test(stranded.stderr), true);
+check('--json carries that same explanation in the envelope',
+  /Tab 4242 was left open on purpose/.test(run(['with-tab', 'https://example.com', 'computer', '--json'], {
+    mode: 'tabs-body-unknown', timeoutSeconds: 1,
+  }).stdout), true);
+
+check('with-tab wants a url', run(['with-tab']).status, 64);
+check('with-tab wants a tool name too', run(['with-tab', 'https://example.com']).status, 64);
+check('with-tab refuses a tabId it would overwrite',
+  run(['with-tab', 'https://example.com', 'navigate', '{"tabId":7}']).status, 64);
+check('with-tab refuses --jsonl', run(['with-tab', 'https://example.com', 'find', '--jsonl']).status, 64);
+check('with-tab rejects extra positionals',
+  run(['with-tab', 'https://example.com', 'find', '{}', 'extra']).status, 64);
+
+// ---- --output -------------------------------------------------------------
+
+const outputDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cic-out-'));
+const outPath = (name) => path.join(outputDir, name);
+// The same whole file the stub sends, from one place, so a change to the
+// fixture cannot leave this asserting bytes nothing produces any more.
+const PNG_BYTES = require('./fixtures/images.js').PNG_1x1;
+
+{
+  const destination = outPath('good.png');
+  const result = run(['call', 'computer', '{"action":"screenshot"}', '--output', destination], { mode: 'image-png' });
+  check('--output succeeds on a real image', result.status, 0);
+  check('and the file holds exactly the bytes that came back',
+    fs.readFileSync(destination).equals(PNG_BYTES), true);
+  check('and the write is reported on stderr, not stdout',
+    /wrote \d+ bytes of image\/png/.test(result.stderr), true);
+  check('while stdout still carries the text part', /here is the shot/.test(result.stdout), true);
+}
+
+check('an unlabelled image is judged on its bytes and written',
+  run(['call', 'computer', '{}', '--output', outPath('unlabelled.png')], { mode: 'image-unlabelled' }).status, 0);
+
+// Each format has its own way of saying where it ends, so each needs a whole
+// file to prove the check accepts one.
+for (const [mode, name] of [['image-jpeg', 'shot2.jpg'], ['image-gif', 'shot.gif'], ['image-webp', 'shot.webp']]) {
+  const result = run(['call', 'computer', '{}', '--output', outPath(name)], { mode });
+  check(`a whole ${name.split('.').pop()} is accepted and written`, result.status, 0);
+  check(`  and ${name} exists`, fs.existsSync(outPath(name)), true);
+}
+
+// Every refusal below must leave no file at all: half a screenshot on disk
+// looks like an answer.
+const refuses = (label, mode, name) => {
+  const destination = outPath(name);
+  const result = run(['call', 'computer', '{}', '--output', destination], { mode });
+  check(label, result.status, 64);
+  check(`  and ${name} is not created`, fs.existsSync(destination), false);
+};
+refuses('a result with no image is a usage error', 'image-none', 'none.png');
+refuses('two images and one destination is refused', 'image-two', 'two.png');
+refuses('base64 cut off mid-transfer is refused', 'image-truncated', 'truncated.png');
+// The one that got through before: the image is cut short and then encoded
+// correctly, so the base64 is valid, its length divides by four and the PNG
+// signature is intact. Nothing short of looking for the end of the format
+// catches it, and without that this command would atomically replace a file
+// with a partial image.
+refuses('an image cut short and cleanly re-encoded is refused', 'image-truncated-cleanly', 'clean-cut.png');
+refuses('a WebP whose declared size does not match is refused', 'image-webp-short-riff', 'short.webp');
+refuses('data that is not base64 is refused', 'image-not-base64', 'notbase64.png');
+refuses('an image part with no data is refused', 'image-no-data', 'nodata.png');
+refuses('bytes that are not an image are refused', 'image-garbage', 'garbage.png');
+refuses('a part whose label contradicts its bytes is refused', 'image-jpeg-labelled-png', 'mislabelled.png');
+
+{
+  // A tool error owns the exit code. Attempting the file would replace the
+  // tool's complaint with a complaint about the destination.
+  const destination = outPath('after-error.png');
+  const result = run(['call', 'computer', '{}', '--output', destination], { mode: 'image-is-error' });
+  check('a tool error stays a tool error even with --output', result.status, 1);
+  check('and writes no file', fs.existsSync(destination), false);
+}
+
+{
+  // What the real bridge does today: JPEG bytes, whatever the destination is
+  // called. The bytes are written and the mismatch is said out loud.
+  const destination = outPath('actually-jpeg.png');
+  const result = run(['call', 'computer', '{}', '--output', destination], { mode: 'image-unlabelled' });
+  check('a name that matches the bytes draws no complaint',
+    /whose name suggests a different format/.test(result.stderr), false);
+  const mismatch = run(['call', 'computer', '{}', '--output', outPath('shot.jpg')], { mode: 'image-png' });
+  check('a destination named for another format is called out',
+    /whose name suggests a different format/.test(mismatch.stderr), true);
+  check('and the bytes are still written, because that is the path that was asked for',
+    fs.readFileSync(outPath('shot.jpg')).equals(PNG_BYTES), true);
+}
+
+check('--output wants a value', run(['call', 'computer', '{}', '--output']).status, 64);
+check('--output does not swallow a following flag',
+  run(['call', 'computer', '{}', '--output', '--json']).status, 64);
+check('list refuses --output, having no image to write',
+  run(['list', '--output', outPath('nope.png')]).status, 64);
+check('session refuses --output', run(['session', '--jsonl', '--output', outPath('nope.png')]).status, 64);
+
+fs.rmSync(outputDir, { recursive: true, force: true });
+
 console.log(failures
   ? `\n${failures} failed${skipped ? `, ${skipped} skipped` : ''}`
   : `\nall passed${skipped ? `, ${skipped} skipped` : ''}`);

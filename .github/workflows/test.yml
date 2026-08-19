@@ -40,6 +40,10 @@ jobs:
         run: npx c8 --no-clean --reporter=none sh test/test_tabs_mcp.sh
       - name: BridgeSession dispatch flag and session reuse
         run: npx c8 --no-clean --reporter=none node test/test_bridge_session.js
+      - name: tab lifecycle and fail-closed cleanup
+        run: npx c8 --no-clean --reporter=none node test/test_tab_lifecycle.js
+      - name: image validation and atomic file output
+        run: npx c8 --no-clean --reporter=none node test/test_image_output.js
       - name: session and shell streaming interfaces
         run: npx c8 --no-clean --reporter=none node test/test_session_command.js
       - name: cic contract, handshake ordering and retries
@@ -54,7 +58,7 @@ jobs:
         shell: bash
         run: |
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            npx c8 report --check-coverage --lines 95 --branches 87 --functions 98
+            npx c8 report --check-coverage --lines 97 --branches 89 --functions 100
           else
             npx c8 report --check-coverage
           fi
