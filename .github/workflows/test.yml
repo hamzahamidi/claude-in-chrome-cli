@@ -58,7 +58,7 @@ jobs:
         shell: bash
         run: |
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            npx c8 report --check-coverage --lines 97 --branches 88 --functions 100
+            npx c8 report --check-coverage --lines 97 --branches 89 --functions 100
           else
             npx c8 report --check-coverage
           fi
