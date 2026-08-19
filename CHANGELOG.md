@@ -24,7 +24,9 @@ The SNSS reader moved out of `tabs_mcp.js` into `lib/session-tabs.js`, for the s
 
 The bundled skill also learned about `cic session` and `cic shell`, which it had never mentioned since 0.6.0 shipped them, alongside the new commands.
 
-Coverage rose to 97.06% of statements and 88.39% of branches, with 76 of 76 functions, and the floors moved to 97 and 88 to match. The tarball is 8 files and the plugin cache 10.
+One more thing came out of measuring rather than assuming. `collect()` reads the real home directory, so it could not be steered from inside the test process, and its discovery failure paths (a profile whose session file is corrupt, one whose data has moved to encrypted storage, one whose directory is empty) were only ever reached on a machine that happened to have Chrome installed with more than one profile. That is a side effect, not a test: the same suite covered less on a CI runner than on a laptop, and the first floors this release set were taken from the laptop and failed all four POSIX legs. Those paths now run in a child process under a synthetic profile tree, so what is covered no longer depends on whose machine it is.
+
+Coverage rose to 98.23% of statements and 88.79% of branches, with 76 of 76 functions, and the floors moved to 98 and 88. Those figures are the ones measured with no browser profile present, which is the lower of the two and what CI actually has. The tarball is 8 files and the plugin cache 10.
 
 ## 0.6.0 (2026-08-19)
 

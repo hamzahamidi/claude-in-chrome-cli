@@ -408,6 +408,148 @@ check('render reports no open tabs when every group is empty but readable', () =
   assert.ok(render([{ profile: 'Default', session_file: 'Session_1', status: 'ok', tabs: [] }]).includes('no profile has an open tab'));
 });
 
+// ---- collect() against a whole synthetic profile tree ---------------------
+//
+// collect() calls userDataDirs() with no arguments, so it reads the real home
+// directory and cannot be steered from inside this process. Running it in a
+// child with a controlled home is what makes these deterministic. Without them
+// the discovery failure paths were only reached on a machine that happened to
+// have Chrome installed with more than one profile, which is a side effect
+// rather than a test: the same suite covered less on a CI runner than on a
+// laptop, and the difference showed up as a coverage floor nobody could explain.
+const LIB = path.join(__dirname, '..', 'plugins', 'claude-in-chrome', 'lib', 'session-tabs.js');
+
+/** The user-data directory this platform's discovery will actually look in. */
+function userDataDirIn(root) {
+  if (process.platform === 'darwin') {
+    return path.join(root, 'Library', 'Application Support', 'Google', 'Chrome');
+  }
+  if (process.platform === 'win32') {
+    return path.join(root, 'AppData', 'Local', 'Google', 'Chrome', 'User Data');
+  }
+  return path.join(root, '.config', 'google-chrome');
+}
+
+/**
+ * Lays out profiles under a throwaway home and returns what collect() makes of
+ * them. Each profile is { name, sessions: [[file, contents]], encrypted: [...] }.
+ */
+function collectIn(profiles) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'collect-'));
+  const userData = userDataDirIn(root);
+  for (const profile of profiles) {
+    for (const [name, contents] of profile.sessions || []) {
+      const dir = path.join(userData, profile.name, 'Sessions');
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, name), contents);
+    }
+    for (const [name, contents] of profile.encrypted || []) {
+      const dir = path.join(userData, profile.name, 'Sessions_Encrypted');
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, name), contents);
+    }
+    if (profile.emptySessionsDir) {
+      fs.mkdirSync(path.join(userData, profile.name, 'Sessions'), { recursive: true });
+    }
+  }
+  const child = require('child_process').spawnSync(
+    process.execPath,
+    ['-e', 'process.stdout.write(JSON.stringify(require(process.argv[1]).collect()))', LIB],
+    {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        HOME: root,
+        USERPROFILE: root,
+        LOCALAPPDATA: path.join(root, 'AppData', 'Local'),
+      },
+    });
+  try {
+    if (child.status !== 0) { throw new Error(`collect failed: ${child.stderr}`); }
+    return JSON.parse(child.stdout);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+
+check('collect finds nothing when there is no browser at all', () => {
+  assert.deepStrictEqual(collectIn([]), []);
+});
+
+check('collect reads a real session file into tabs', () => {
+  const groups = collectIn([{
+    name: 'Default',
+    sessions: [['Session_1', buildSession([
+      setTabWindow(1, 101),
+      updateTabNavigation(101, 0, 'https://example.com/page', 'Example'),
+    ])]],
+  }]);
+  assert.strictEqual(groups.length, 1);
+  assert.strictEqual(groups[0].status, 'ok');
+  assert.strictEqual(groups[0].tabs.length, 1);
+  assert.strictEqual(groups[0].tabs[0].url, 'https://example.com/page');
+});
+
+// A Sessions directory with nothing in it is a profile that exists and has no
+// recoverable data, which is not the same as no profile.
+check('collect reports a profile whose Sessions directory is empty as unreadable', () => {
+  const groups = collectIn([{ name: 'Default', emptySessionsDir: true }]);
+  assert.strictEqual(groups.length, 1);
+  assert.strictEqual(groups[0].status, 'unreadable');
+  assert.strictEqual(groups[0].session_file, null);
+});
+
+// The distinction 0.3.1 added: encrypted is a permanent by-design gap, and must
+// not be reported the same way as a corrupt or missing file.
+check('collect reports an encrypted-only profile as encrypted, not unreadable', () => {
+  const groups = collectIn([{ name: 'Default', encrypted: [['Session_1', 'ciphertext']] }]);
+  assert.strictEqual(groups.length, 1);
+  assert.strictEqual(groups[0].status, 'encrypted');
+});
+
+check('collect reports a corrupt session file as unreadable rather than empty', () => {
+  const groups = collectIn([{ name: 'Default', sessions: [['Session_1', 'not an snss file at all']] }]);
+  assert.strictEqual(groups.length, 1);
+  assert.strictEqual(groups[0].status, 'unreadable');
+});
+
+// A file too short to hold even a header makes parseSession throw rather than
+// return, which is a different branch from a file that parses to nothing.
+check('collect survives a session file too short to parse', () => {
+  const groups = collectIn([{ name: 'Default', sessions: [['Session_1', Buffer.from([1, 2])]] }]);
+  assert.strictEqual(groups[0].status, 'unreadable');
+});
+
+check('collect keeps profiles apart, reporting each on its own terms', () => {
+  const groups = collectIn([
+    {
+      name: 'Default',
+      sessions: [['Session_1', buildSession([
+        setTabWindow(1, 101),
+        updateTabNavigation(101, 0, 'https://example.com/', 'Example'),
+      ])]],
+    },
+    { name: 'Profile 1', sessions: [['Session_1', 'corrupt']] },
+    { name: 'Profile 2', encrypted: [['Session_1', 'ciphertext']] },
+  ]);
+  const byProfile = Object.fromEntries(groups.map((g) => [g.profile, g.status]));
+  assert.deepStrictEqual(byProfile, { Default: 'ok', 'Profile 1': 'unreadable', 'Profile 2': 'encrypted' });
+});
+
+// A directory that is not a profile must not become one just by existing.
+check('collect ignores directories that are not profiles', () => {
+  assert.deepStrictEqual(collectIn([{ name: 'NotAProfile', emptySessionsDir: true }]), []);
+});
+
+check('render names the profiles it could not read alongside the ones it could', () => {
+  const text = render([
+    { profile: 'Default', session_file: 'Session_1', status: 'ok', tabs: [{ tab_id: 1, window_id: 1, url: 'https://example.com/', title: 'Example' }] },
+    { profile: 'Profile 1', session_file: null, status: 'unreadable', tabs: [] },
+  ]);
+  assert.ok(text.includes('1 other profile(s) could not be read'), text);
+  assert.ok(text.includes('Profile 1'), text);
+});
+
 check('userDataDirs finds Chrome and Chromium on Windows', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'win32-'));
   fs.mkdirSync(path.join(root, 'Google', 'Chrome', 'User Data'), { recursive: true });
