@@ -127,7 +127,9 @@ cic with-tab https://example.com computer '{"action":"screenshot"}' --output sho
 
 It fills in `tabId` and nothing else, so passing your own is a usage error rather than a silently ignored argument. `--keep-tab` leaves the tab for inspection.
 
-**After an unknown outcome the tab is deliberately left open**, and its id is printed. The request reached the browser and no usable reply came back, so closing the tab could discard a half-finished action and destroy the only evidence of it. An ordinary tool error is different: the browser answered, so the tab is closed as usual. A cleanup that fails after the work succeeded is reported as a warning and does not turn a success into a failure.
+**After an unknown outcome the tab is deliberately left open**, and its id is printed. The request reached the browser and no usable reply came back, so closing the tab could discard a half-finished action and destroy the only evidence of it. An ordinary tool error is different: the browser answered, so the tab is closed as usual. A cleanup that fails is always reported and never swallowed, whether the work succeeded or not: after a success it is a warning beside the result, and after a failure it is appended to that failure, since a tab that may still be open is exactly what you need to know while reading why the work failed.
+
+The helper behind it lives in `lib/tab-lifecycle.js` rather than on `BridgeSession`. That class is the generic protocol layer and knows nothing about what any tool is called; this is the file where `tabs_create_mcp`, `navigate` and `tabs_close_mcp` are allowed to be named.
 
 ### Getting an image out
 
@@ -137,7 +139,9 @@ It fills in `tabId` and nothing else, so passing your own is a usage error rathe
 cic call computer '{"action":"screenshot","tabId":123}' --output shot.png
 ```
 
-It refuses, and writes nothing at all, when the result carries no image, carries more than one, or carries bytes that are not an image: the base64 must be complete, the magic bytes must match a format it knows, and a declared type that contradicts those bytes is a refusal rather than a guess. The write itself goes to a temporary file in the destination's directory and is renamed into place, so an existing file survives every one of those refusals. A path that exists therefore always holds a whole image, because half a screenshot on disk looks like an answer.
+It refuses, and writes nothing at all, when the result carries no image, carries more than one, or carries bytes that are not a whole image. Four things are checked: the base64 is complete, the leading bytes match a format it knows, a declared type does not contradict those bytes, and the data reaches the end of its own format. That last one is the point. A truncated PNG still begins with the PNG signature, and base64 cut at a length divisible by four is still valid base64, so a header check alone accepts a fragment: each format is therefore asked where it ends, by walking PNG chunks to `IEND`, requiring the JPEG end-of-image marker, the GIF trailer, or a WebP whose declared RIFF size matches what arrived.
+
+The write goes to a temporary file in the destination's directory and is renamed into place, so an existing file survives every one of those refusals. A path that exists therefore holds a whole image, because half a screenshot on disk looks like an answer.
 
 Those refusals exit 64. The browser did what it was asked and the file is what could not be produced, which is neither a tool error nor anything safe to retry, and the exit-code contract has been frozen since 0.4.0 rather than growing a sixth code. One thing worth knowing: the bridge returns JPEG today whatever you call the file, so `--output shot.png` reports on stderr that the name suggests a different format from the bytes it wrote.
 

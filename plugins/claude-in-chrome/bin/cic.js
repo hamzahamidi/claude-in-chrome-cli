@@ -10,9 +10,10 @@
 // command line: arguments, output, retries and the exit-code contract.
 'use strict';
 
-const { BridgeSession, BridgeError, TabLifecycleError } = require('../lib/bridge-session.js');
+const { BridgeSession, BridgeError } = require('../lib/bridge-session.js');
 const { runSession, runShell } = require('../lib/session-command.js');
 const { writeImageResult, ImageOutputError } = require('../lib/image-output.js');
+const { withTab, TabLifecycleError } = require('../lib/tab-lifecycle.js');
 
 const VERSION = '0.7.0';
 const DEFAULT_TIMEOUT_SECONDS = 30;
@@ -316,7 +317,7 @@ async function attempt(plan, options) {
     if (plan.command !== 'with-tab') {
       return await session.call(plan.method, plan.params);
     }
-    const held = await session.withTab(
+    const held = await withTab(session,
       { url: plan.url, keepTab: options.keepTab, timeoutSeconds: options.timeout },
       (tabId) => session.call('tools/call', {
         name: plan.params.name,
@@ -522,6 +523,10 @@ function classify(failure) {
     if (failure && failure.tabLeftOpen) {
       message += ` Tab ${failure.tabId} was left open on purpose, because closing a tab whose outcome is unknown could discard what it was doing.`;
     }
+    // A cleanup that also failed is appended rather than dropped. Reporting only
+    // why the work failed, while its tab is still sitting there, hides the one
+    // thing this command exists to get right.
+    if (failure && failure.tabWarning) { message += ` ${failure.tabWarning}`; }
     try {
       if (asJson) { await writeOut(envelope(exitCode, message)); }
       else { await writeErr(`cic: ${message}\n`); }

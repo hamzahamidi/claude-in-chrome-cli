@@ -10,6 +10,6 @@
   "report-dir": "coverage",
   "temp-directory": "node_modules/.cache/c8",
   "lines": 98,
-  "branches": 88,
+  "branches": 89,
   "functions": 100
 }

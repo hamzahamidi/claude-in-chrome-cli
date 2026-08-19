@@ -15,18 +15,80 @@ const fs = require('fs');
 const path = require('path');
 
 /**
- * Magic bytes per format. A declared mimeType is a claim by the sender; these
- * are the bytes themselves, so a disagreement between the two means something
- * is wrong and the write is refused rather than guessed at.
+ * Magic bytes per format, and how each one proves it is not cut short.
+ *
+ * The leading bytes alone are not enough, which is the whole difficulty here. A
+ * truncated PNG still begins with the PNG signature, and a base64 body cut at a
+ * length divisible by four is still valid base64, so a header check plus an
+ * encoding check accepted a 30-byte fragment of a 70-byte image and wrote it
+ * out. Every format therefore also has to say where its end is, because "a file
+ * exists at that path" is only useful if the file is whole.
+ *
+ * A declared mimeType is a claim by the sender; the magic bytes are the bytes
+ * themselves, so a disagreement between the two is refused rather than guessed.
  */
 const FORMATS = [
-  { mime: 'image/png', extension: '.png', magic: [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a] },
-  { mime: 'image/jpeg', extension: '.jpg', magic: [0xff, 0xd8, 0xff] },
-  { mime: 'image/gif', extension: '.gif', magic: [0x47, 0x49, 0x46, 0x38] },
+  {
+    mime: 'image/png',
+    extension: '.png',
+    magic: [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a],
+    complete: isWholePng,
+  },
+  { mime: 'image/jpeg', extension: '.jpg', magic: [0xff, 0xd8, 0xff], complete: isWholeJpeg },
+  { mime: 'image/gif', extension: '.gif', magic: [0x47, 0x49, 0x46, 0x38], complete: isWholeGif },
   // RIFF....WEBP: the four size bytes in between are not fixed, so this one is
   // checked in two pieces.
-  { mime: 'image/webp', extension: '.webp', magic: [0x52, 0x49, 0x46, 0x46], at8: [0x57, 0x45, 0x42, 0x50] },
+  {
+    mime: 'image/webp',
+    extension: '.webp',
+    magic: [0x52, 0x49, 0x46, 0x46],
+    at8: [0x57, 0x45, 0x42, 0x50],
+    complete: isWholeWebp,
+  },
 ];
+
+/**
+ * Walks the PNG chunk list and requires it to end, exactly, on IEND.
+ *
+ * Each chunk is a four-byte big-endian length, a four-byte type, that many
+ * bytes, and a four-byte CRC. Following the lengths is what makes this a
+ * completeness check rather than a look at the tail: a file whose final chunk
+ * claims more data than is present fails here even though the last four bytes
+ * might happen to spell something plausible.
+ */
+function isWholePng(buffer) {
+  let at = 8;
+  let sawEnd = false;
+  while (at + 12 <= buffer.length) {
+    const length = buffer.readUInt32BE(at);
+    const type = buffer.toString('latin1', at + 4, at + 8);
+    // 12 is the chunk overhead: length, type and CRC.
+    const next = at + 12 + length;
+    if (next > buffer.length) { return false; }
+    if (type === 'IEND') { sawEnd = true; at = next; break; }
+    at = next;
+  }
+  return sawEnd && at === buffer.length;
+}
+
+/** JPEG ends at its end-of-image marker, so the last two bytes must be it. */
+function isWholeJpeg(buffer) {
+  return buffer.length >= 4 && buffer[buffer.length - 2] === 0xff && buffer[buffer.length - 1] === 0xd9;
+}
+
+/** GIF ends at its trailer byte. */
+function isWholeGif(buffer) {
+  return buffer.length >= 6 && buffer[buffer.length - 1] === 0x3b;
+}
+
+/**
+ * RIFF states its own payload size at offset 4, covering everything after the
+ * first eight bytes, so the container can be checked against the bytes present.
+ */
+function isWholeWebp(buffer) {
+  if (buffer.length < 12) { return false; }
+  return buffer.readUInt32LE(4) === buffer.length - 8;
+}
 
 /** Raised for anything that should stop the write before a file is touched. */
 class ImageOutputError extends Error {}
@@ -66,6 +128,13 @@ function decodeImagePart(part) {
   if (!format) {
     throw new ImageOutputError(
       'the data does not begin with PNG, JPEG, GIF or WebP magic bytes, so it is not an image this can verify');
+  }
+  // Valid base64 of the right length carrying the right header still proves
+  // nothing about the end of the file, and the end is what a cut-off transfer
+  // loses.
+  if (!format.complete(buffer)) {
+    throw new ImageOutputError(
+      `the ${format.mime} data is incomplete: it starts correctly but does not reach the end of the format`);
   }
   // A sender that labels its own bytes wrongly is reporting something broken
   // upstream; writing the file anyway would hide it behind a plausible name.

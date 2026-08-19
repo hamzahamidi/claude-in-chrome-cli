@@ -8,15 +8,16 @@
   "files": [
     "plugins/claude-in-chrome/bin/cic.js",
     "plugins/claude-in-chrome/lib/bridge-session.js",
+    "plugins/claude-in-chrome/lib/image-output.js",
     "plugins/claude-in-chrome/lib/session-command.js",
     "plugins/claude-in-chrome/lib/session-tabs.js",
-    "plugins/claude-in-chrome/lib/image-output.js"
+    "plugins/claude-in-chrome/lib/tab-lifecycle.js"
   ],
   "engines": {
     "node": ">=22"
   },
   "scripts": {
-    "test": "node test/test_tabs_parser.js && sh test/test_tabs_mcp.sh && node test/test_bridge_session.js && node test/test_image_output.js && node test/test_session_command.js && node test/test_cic_cli.js",
+    "test": "node test/test_tabs_parser.js && sh test/test_tabs_mcp.sh && node test/test_bridge_session.js && node test/test_tab_lifecycle.js && node test/test_image_output.js && node test/test_session_command.js && node test/test_cic_cli.js",
     "test:install": "sh test/test_plugin_install.sh",
     "test:coverage": "c8 --reporter=none npm test && npm run coverage:report",
     "coverage:report": "c8 report --check-coverage"

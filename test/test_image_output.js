@@ -35,23 +35,26 @@ async function refusal(fn) {
   }
 }
 
-// A real 1x1 PNG, not a signature with filler, so the happy path is a file an
-// image viewer would actually open.
-const PNG_1x1 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==';
-const withMagic = (bytes, size = 64) => Buffer.concat([Buffer.from(bytes), Buffer.alloc(size, 9)]).toString('base64');
-const JPEG = withMagic([0xff, 0xd8, 0xff, 0xe0]);
-const GIF = withMagic([0x47, 0x49, 0x46, 0x38]);
-// RIFF then WEBP at offset 8, with four size bytes in between.
-const WEBP = Buffer.concat([
-  Buffer.from([0x52, 0x49, 0x46, 0x46]), Buffer.from([1, 2, 3, 4]),
-  Buffer.from([0x57, 0x45, 0x42, 0x50]), Buffer.alloc(40, 5),
-]).toString('base64');
+// Whole files, one per format. Deliberately not a magic header with filler
+// after it: that is what an interrupted transfer produces, so using it as the
+// valid fixture would assert the opposite of the guarantee under test.
+const fixtures = require('./fixtures/images.js');
+
+const b64 = (buffer) => buffer.toString('base64');
+const PNG_1x1 = b64(fixtures.PNG_1x1);
+const JPEG = b64(fixtures.JPEG);
+const GIF = b64(fixtures.GIF);
+const WEBP = b64(fixtures.WEBP);
+
 // RIFF, but a WAVE rather than a WEBP: the four bytes at offset 8 are the only
 // thing separating them, which is exactly why they are checked.
-const RIFF_WAVE = Buffer.concat([
-  Buffer.from([0x52, 0x49, 0x46, 0x46]), Buffer.from([1, 2, 3, 4]),
-  Buffer.from([0x57, 0x41, 0x56, 0x45]), Buffer.alloc(40, 5),
-]).toString('base64');
+const RIFF_WAVE = (() => {
+  const payload = Buffer.concat([Buffer.from('WAVE', 'latin1'), Buffer.alloc(20, 5)]);
+  const header = Buffer.alloc(8);
+  Buffer.from('RIFF', 'latin1').copy(header, 0);
+  header.writeUInt32LE(payload.length, 4);
+  return b64(Buffer.concat([header, payload]));
+})();
 
 const image = (extra) => ({ type: 'image', ...extra });
 const resultWith = (...content) => ({ content });
@@ -99,6 +102,62 @@ async function main() {
     'the image data is not valid base64, so it is incomplete or corrupted');
   check('and Node itself would have accepted that same string',
     Buffer.from(PNG_1x1.slice(0, 41), 'base64').length > 0, true);
+
+  // ---- and completeness, which none of the above establishes ---------------
+  //
+  // Every check so far passes for a truncated image. The base64 can be valid,
+  // its length can divide by four and the signature can be intact while most of
+  // the file is missing, and the first version of this module accepted exactly
+  // that and wrote it over the destination.
+  {
+    const cut40 = PNG_1x1.slice(0, 40);
+    check('a 40-character prefix is still syntactically valid base64',
+      cut40.length % 4 === 0 && /^[A-Za-z0-9+/]+={0,2}$/.test(cut40), true);
+    check('and still decodes to bytes carrying the PNG signature',
+      Buffer.from(cut40, 'base64').subarray(0, 8).equals(fixtures.PNG_1x1.subarray(0, 8)), true);
+    check('but it is refused, because it never reaches IEND',
+      await refusal(() => decodeImagePart(image({ data: cut40 }))),
+      'the image/png data is incomplete: it starts correctly but does not reach the end of the format');
+  }
+
+  // The harder shape, and the realistic one: bytes lost in transfer and then
+  // encoded correctly, so nothing about the encoding is suspicious.
+  check('an image cut short and then encoded properly is refused',
+    await refusal(() => decodeImagePart(image({ data: b64(fixtures.cut(fixtures.PNG_1x1, 12)) }))),
+    'the image/png data is incomplete: it starts correctly but does not reach the end of the format');
+  check('a JPEG missing its end-of-image marker is refused',
+    await refusal(() => decodeImagePart(image({ data: b64(fixtures.cut(fixtures.JPEG, 2)) }))),
+    'the image/jpeg data is incomplete: it starts correctly but does not reach the end of the format');
+  check('a GIF missing its trailer is refused',
+    await refusal(() => decodeImagePart(image({ data: b64(fixtures.cut(fixtures.GIF, 1)) }))),
+    'the image/gif data is incomplete: it starts correctly but does not reach the end of the format');
+
+  // PNG completeness follows the chunk lengths rather than looking at the tail,
+  // so a final chunk claiming more data than arrived fails even though the last
+  // bytes might spell something plausible.
+  {
+    const lying = Buffer.from(fixtures.PNG_1x1);
+    lying.writeUInt32BE(9999, 8);
+    check('a PNG whose chunk length overruns the buffer is refused',
+      await refusal(() => decodeImagePart(image({ data: b64(lying) }))),
+      'the image/png data is incomplete: it starts correctly but does not reach the end of the format');
+  }
+
+  // RIFF states its own payload size, which is the cheapest completeness check
+  // of the four and the only one that can catch trailing loss exactly.
+  {
+    const lying = Buffer.from(fixtures.WEBP);
+    lying.writeUInt32LE(lying.length + 100, 4);
+    check('a WebP whose declared size exceeds what arrived is refused',
+      await refusal(() => decodeImagePart(image({ data: b64(lying) }))),
+      'the image/webp data is incomplete: it starts correctly but does not reach the end of the format');
+  }
+  {
+    const lying = Buffer.from(fixtures.WEBP);
+    lying.writeUInt32LE(4, 4);
+    check('and so is one that declares less', await refusal(() => decodeImagePart(image({ data: b64(lying) }))),
+      'the image/webp data is incomplete: it starts correctly but does not reach the end of the format');
+  }
 
   check('valid base64 that is not an image is refused',
     await refusal(() => decodeImagePart(image({ data: Buffer.alloc(40, 3).toString('base64') }))),
@@ -150,8 +209,14 @@ async function main() {
   {
     const destination = path.join(dir, 'precious.png');
     fs.writeFileSync(destination, 'a file that matters');
-    await refusal(() => writeImageResult(resultWith(image({ data: PNG_1x1.slice(0, 41) })), destination));
+    // The truncation that used to get through: cleanly encoded, right header,
+    // no end. This is the case the whole atomic-write path exists for.
+    await refusal(() => writeImageResult(
+      resultWith(image({ data: b64(fixtures.cut(fixtures.PNG_1x1, 12)) })), destination));
     check('an existing file is untouched when the image is truncated',
+      fs.readFileSync(destination, 'utf8'), 'a file that matters');
+    await refusal(() => writeImageResult(resultWith(image({ data: PNG_1x1.slice(0, 41) })), destination));
+    check('and untouched when the base64 itself is cut off',
       fs.readFileSync(destination, 'utf8'), 'a file that matters');
     await refusal(() => writeImageResult(resultWith({ type: 'text', text: 'no' }), destination));
     check('and untouched when there is no image at all',
