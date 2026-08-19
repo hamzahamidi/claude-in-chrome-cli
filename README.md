@@ -104,6 +104,10 @@ A malformed line is that line's problem: it gets a `usage` record and the sessio
 
 For driving it by hand, `cic shell` is the same connection with a prompt. One line is a tool name and optional JSON arguments, nothing is remembered between lines, and `.exit` or Ctrl-D leaves.
 
+![A cic shell session making four calls over one connection: the tabId printed by the first reply is threaded into the three that follow. Each reply's tab context is elided.](docs/cic-demo-session.webp)
+
+That is a real session, recorded through a pty. The tab context every reply carries is elided from the recording, and [`docs/make-demo.js`](docs/make-demo.js) regenerates the image.
+
 ### Moving from `cic.sh`
 
 The shell script is gone as of 0.4.0. It exited 0 on tool errors, so pipelines carried on after a failure, and its `sleep`-based wait was a floor as well as a ceiling. Both are fixed in the Node client rather than patched in shell. The old script stays fetchable from the `v0.2.x` and `v0.3.x` tags.
