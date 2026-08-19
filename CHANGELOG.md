@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.7.0 (unreleased)
+## 0.7.0 (2026-08-20)
 
 Adds three things a script could not do before: keep a tab for exactly one job and clean it up, get an image out to a file, and ask what is open without a bridge.
 
@@ -30,7 +30,7 @@ Those refusals exit 64. The browser did what it was asked and the file is what c
 
 Redaction applies to `--json` as well as to the rendered text. `collect()` returns raw URLs and the rendering is what redacts them, so emitting that structure directly would have quietly turned the safe default off for whoever chose machine-readable output. A `--profile` that matches nothing is a usage error naming the profiles that do exist, rather than an answer indistinguishable from an empty browser.
 
-The SNSS reader moved out of `tabs_mcp.js` into `lib/session-tabs.js`, for the same reason the protocol moved into `BridgeSession` in 0.5.0: there are two consumers now, and the CLI should not have to load a file that also has a `main()`. The move is proved by the 53 parser checks and 13 handshake checks passing untouched, which is what re-exporting from the old path is for.
+The SNSS reader moved out of `tabs_mcp.js` into `lib/session-tabs.js`, for the same reason the protocol moved into `BridgeSession` in 0.5.0: there are two consumers now, and the CLI should not have to load a file that also has a `main()`. The move is proved by the 53 parser checks and 13 handshake checks that existed at the time passing untouched, which is what re-exporting from the old path is for. The parser suite is larger now, because covering profile discovery properly came later in the same release.
 
 The bundled skill also learned about `cic session` and `cic shell`, which it had never mentioned since 0.6.0 shipped them, alongside the new commands.
 
