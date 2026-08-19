@@ -38,8 +38,10 @@ jobs:
       - name: chrome-tabs MCP handshake
         shell: bash
         run: npx c8 --no-clean --reporter=none sh test/test_tabs_mcp.sh
-      - name: BridgeSession dispatch flag and session reuse
+      - name: BridgeSession dispatch flag, session reuse and tab lifecycle
         run: npx c8 --no-clean --reporter=none node test/test_bridge_session.js
+      - name: image validation and atomic file output
+        run: npx c8 --no-clean --reporter=none node test/test_image_output.js
       - name: session and shell streaming interfaces
         run: npx c8 --no-clean --reporter=none node test/test_session_command.js
       - name: cic contract, handshake ordering and retries

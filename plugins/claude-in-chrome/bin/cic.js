@@ -10,10 +10,11 @@
 // command line: arguments, output, retries and the exit-code contract.
 'use strict';
 
-const { BridgeSession, BridgeError } = require('../lib/bridge-session.js');
+const { BridgeSession, BridgeError, TabLifecycleError } = require('../lib/bridge-session.js');
 const { runSession, runShell } = require('../lib/session-command.js');
+const { writeImageResult, ImageOutputError } = require('../lib/image-output.js');
 
-const VERSION = '0.6.0';
+const VERSION = '0.7.0';
 const DEFAULT_TIMEOUT_SECONDS = 30;
 // Backoff between retries. Only exit-3 failures are retried, and those fail
 // fast, so this stays short enough to be worth doing inside one command.
@@ -39,11 +40,17 @@ Usage:
   cic call <tool> [json-args]       call a tool, arguments default to {}
   cic session --jsonl               many calls over one connection, one JSON object per line
   cic shell                         the same connection, driven by hand
+  cic with-tab <url> <tool> [args]  make a tab, navigate, call one tool, close it
+  cic tabs                          every open tab, read from disk without the bridge
 
 Options:
   --timeout <secs>   ceiling on how long to wait for the reply (default ${DEFAULT_TIMEOUT_SECONDS})
   --retries <n>      retry only failures that never reached the browser (exit 3)
   --json             print the raw result object, or one error object, on one line
+  --output <path>    write the image in the result to a file (call, with-tab)
+  --keep-tab         leave the tab open instead of closing it (with-tab)
+  --profile <name>   only this browser profile (tabs)
+  --full-urls        raw URLs instead of redacted origin and path (tabs)
   -h, --help         this text
   -v, --version      print the version
 
@@ -51,8 +58,12 @@ Examples:
   cic list
   cic call navigate '{"url":"https://example.com"}'
   cic call get_page_text '{}' --timeout 60
-  cic call computer '{"action":"screenshot"}' --json
+  cic call computer '{"action":"screenshot","tabId":123}' --output shot.png
   cic call navigate '{"url":"https://example.com"}' --retries 3
+  cic with-tab https://example.com get_page_text
+  cic with-tab https://example.com computer '{"action":"screenshot"}' --output shot.png
+  cic tabs
+  cic tabs --json --profile Default
   echo '{"id":1,"tool":"tabs_create_mcp"}' | cic session --jsonl
   cic shell
 
@@ -81,9 +92,13 @@ class UsageError extends Error {}
 // other than what was asked for.
 const FLAGS_BY_COMMAND = {
   list: new Set(['--json', '--timeout', '--retries']),
-  call: new Set(['--json', '--timeout', '--retries']),
+  call: new Set(['--json', '--timeout', '--retries', '--output']),
   session: new Set(['--jsonl', '--timeout']),
   shell: new Set(['--timeout']),
+  'with-tab': new Set(['--json', '--timeout', '--retries', '--output', '--keep-tab']),
+  // No bridge is involved, so nothing here can time out, be retried or be
+  // unknown. Offering those flags would imply otherwise.
+  tabs: new Set(['--json', '--profile', '--full-urls']),
 };
 
 function rejectUnsupportedFlags(command, provided) {
@@ -155,7 +170,16 @@ const textOf = (result) => (result.content || [])
 const sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
 
 function parseArguments(argv) {
-  const options = { timeout: DEFAULT_TIMEOUT_SECONDS, retries: 0, json: false, jsonl: false };
+  const options = {
+    timeout: DEFAULT_TIMEOUT_SECONDS,
+    retries: 0,
+    json: false,
+    jsonl: false,
+    fullUrls: false,
+    keepTab: false,
+    output: null,
+    profile: null,
+  };
   // Which flags were actually typed, as opposed to left at a default. A command
   // can then refuse one it would silently ignore, rather than exiting 0 having
   // done something other than what was asked.
@@ -181,9 +205,17 @@ function parseArguments(argv) {
     const argument = argv[i];
     if (argument === '--json') { options.json = true; provided.add('--json'); }
     else if (argument === '--jsonl') { options.jsonl = true; provided.add('--jsonl'); }
+    else if (argument === '--full-urls') { options.fullUrls = true; provided.add('--full-urls'); }
+    else if (argument === '--keep-tab') { options.keepTab = true; provided.add('--keep-tab'); }
     else if (argument === '-h' || argument === '--help') { options.help = true; }
     else if (argument === '-v' || argument === '--version') { options.version = true; }
-    else if (argument === '--timeout') {
+    else if (argument === '--output' || argument === '--profile') {
+      const raw = valueFor(argument, i);
+      if (raw === null) { continue; }
+      i++;
+      provided.add(argument);
+      options[argument === '--output' ? 'output' : 'profile'] = raw;
+    } else if (argument === '--timeout') {
       const raw = valueFor('--timeout', i);
       if (raw === null) { continue; }
       i++;
@@ -214,35 +246,61 @@ function parseArguments(argv) {
   return { options, positional, provided, error };
 }
 
+const COMMANDS = ['list', 'call', 'session', 'shell', 'with-tab', 'tabs'];
+
+/** Arguments JSON, or a usage error naming why it was rejected. */
+function parseToolArguments(raw) {
+  let parsed;
+  try {
+    parsed = JSON.parse(raw === undefined ? '{}' : raw);
+  } catch (failure) {
+    throw new UsageError(`arguments are not valid JSON: ${failure.message}`);
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new UsageError('arguments must be a JSON object.');
+  }
+  return parsed;
+}
+
 /** Decides what the command means, before anything is spawned. */
 function planRequest(positional) {
-  const [command, toolName, rawArguments, ...extra] = positional;
-  if (command !== 'list' && command !== 'call') {
-    throw new UsageError(`unknown command '${command}'. Expected 'list', 'call', 'session' or 'shell'.`);
+  const [command, ...rest] = positional;
+  if (command !== 'list' && command !== 'call' && command !== 'with-tab') {
+    throw new UsageError(`unknown command '${command}'. Expected one of ${COMMANDS.join(', ')}.`);
   }
 
   if (command === 'list') {
-    if (toolName !== undefined) {
-      throw new UsageError(`list takes no arguments, got '${toolName}'.`);
+    if (rest.length) {
+      throw new UsageError(`list takes no arguments, got '${rest[0]}'.`);
     }
     return { command, method: 'tools/list', params: {} };
   }
 
+  // with-tab takes the URL first, then the same tool name and JSON arguments
+  // call takes. The tabId is the one key it fills in, which is the whole point
+  // of the command; everything else stays pass-through.
+  if (command === 'with-tab') {
+    const [url, toolName, rawArguments, ...extra] = rest;
+    if (!url) { throw new UsageError('with-tab wants a url.'); }
+    if (!toolName) { throw new UsageError('with-tab wants a url and a tool name.'); }
+    if (extra.length) {
+      throw new UsageError(
+        `with-tab takes a url, a tool name and optional JSON arguments, got ${extra.length} extra: '${extra.join("', '")}'.`);
+    }
+    const toolArguments = parseToolArguments(rawArguments);
+    if ('tabId' in toolArguments) {
+      throw new UsageError('with-tab sets tabId itself, so passing one would be ignored. Use call for a tab you already have.');
+    }
+    return { command, method: 'tools/call', url, params: { name: toolName, arguments: toolArguments } };
+  }
+
+  const [toolName, rawArguments, ...extra] = rest;
   if (!toolName) { throw new UsageError('call wants a tool name.'); }
   if (extra.length) {
     throw new UsageError(
       `call takes a tool name and optional JSON arguments, got ${extra.length} extra: '${extra.join("', '")}'.`);
   }
-  let toolArguments;
-  try {
-    toolArguments = JSON.parse(rawArguments === undefined ? '{}' : rawArguments);
-  } catch (failure) {
-    throw new UsageError(`arguments are not valid JSON: ${failure.message}`);
-  }
-  if (toolArguments === null || typeof toolArguments !== 'object' || Array.isArray(toolArguments)) {
-    throw new UsageError('arguments must be a JSON object.');
-  }
-  return { command, method: 'tools/call', params: { name: toolName, arguments: toolArguments } };
+  return { command, method: 'tools/call', params: { name: toolName, arguments: parseToolArguments(rawArguments) } };
 }
 
 /**
@@ -255,10 +313,60 @@ async function attempt(plan, options) {
   session.clientVersion = VERSION;
   try {
     await session.open();
-    return await session.call(plan.method, plan.params);
+    if (plan.command !== 'with-tab') {
+      return await session.call(plan.method, plan.params);
+    }
+    const held = await session.withTab(
+      { url: plan.url, keepTab: options.keepTab, timeoutSeconds: options.timeout },
+      (tabId) => session.call('tools/call', {
+        name: plan.params.name,
+        arguments: { ...plan.params.arguments, tabId },
+      }));
+    if (held.tabWarning) { await writeErr(`cic: ${held.tabWarning}\n`); }
+    return held.outcome;
   } finally {
     await session.close();
   }
+}
+
+/**
+ * `cic tabs`: the same answer the chrome-tabs MCP tool gives, straight from the
+ * files, with no bridge in the middle.
+ *
+ * The redaction is applied here for --json as well, not only in the rendered
+ * text. collect() returns raw URLs, so emitting them as JSON would have quietly
+ * turned the safe default off for whoever chose the machine-readable output.
+ */
+async function reportTabs(options) {
+  const { collect, render, redactUrl } = require('../lib/session-tabs.js');
+  const groups = collect(options.profile);
+
+  // A profile that matched nothing is a typo worth naming. The rendered text
+  // would otherwise say no session data was found, which is true of that name
+  // and misleading about the machine.
+  if (options.profile && groups.length === 0) {
+    const available = [...new Set(collect().map((group) => group.profile))];
+    throw new UsageError(available.length
+      ? `no profile named '${options.profile}'. This machine has ${available.join(', ')}.`
+      : `no profile named '${options.profile}', and no readable browser profile was found at all.`);
+  }
+
+  if (options.json) {
+    const payload = {
+      groups: groups.map((group) => ({
+        ...group,
+        tabs: group.tabs.map((tab) => ({
+          ...tab,
+          url: options.fullUrls ? tab.url : redactUrl(tab.url),
+        })),
+      })),
+    };
+    await writeOut(JSON.stringify(payload) + '\n');
+    return EXIT.OK;
+  }
+
+  await writeOut(render(groups, { includeUrls: true, fullUrls: options.fullUrls }) + '\n');
+  return EXIT.OK;
 }
 
 async function main() {
@@ -298,6 +406,16 @@ async function main() {
     });
   }
 
+  // Reading session files needs no bridge, no handshake and no extension, so
+  // this answers and returns before any of the transport machinery below.
+  if (positional[0] === 'tabs') {
+    rejectUnsupportedFlags('tabs', provided);
+    if (positional.length > 1) {
+      throw new UsageError(`tabs takes no positional arguments, got '${positional[1]}'.`);
+    }
+    return reportTabs(options);
+  }
+
   const plan = planRequest(positional);
   rejectUnsupportedFlags(plan.command, provided);
 
@@ -326,6 +444,24 @@ async function main() {
   }
 
   const result = reply.result;
+
+  // Saving comes before printing, and never runs for a tool error: a failed
+  // call has no image worth keeping, and attempting one would replace the
+  // tool's complaint with a complaint about the file.
+  if (options.output && !result.isError) {
+    const written = await writeImageResult(result, options.output);
+    // A destination named .png holding a JPEG is what the bridge actually
+    // returns today, so the mismatch is said out loud rather than left for
+    // whoever opens the file. The bytes are still written: the caller asked for
+    // this path, and renaming it for them would be a surprise of its own.
+    const named = options.output.toLowerCase();
+    const mismatched = /\.[a-z0-9]+$/.test(named) && !named.endsWith(written.extension)
+      && !(written.extension === '.jpg' && named.endsWith('.jpeg'));
+    // stderr, so a caller piping stdout gets the result and not this.
+    await writeErr(mismatched
+      ? `cic: wrote ${written.bytes} bytes of ${written.mime} to ${options.output}, whose name suggests a different format. ${written.extension} would match the bytes.\n`
+      : `cic: wrote ${written.bytes} bytes of ${written.mime} to ${options.output}\n`);
+  }
 
   if (options.json) {
     // isError is the tool saying it failed, so --json owes the caller the
@@ -357,6 +493,15 @@ async function main() {
 function classify(failure) {
   if (failure instanceof UsageError) { return EXIT.USAGE; }
   if (failure instanceof BridgeError) { return failure.dispatched ? EXIT.UNKNOWN : EXIT.TRANSPORT; }
+  // The browser did what it was asked and the file is what could not be
+  // produced, so this is neither a tool error nor anything retryable. It gets
+  // 64 as the code for "this invocation cannot be completed as written",
+  // rather than a sixth code added to a contract frozen since 0.4.0.
+  if (failure instanceof ImageOutputError) { return EXIT.USAGE; }
+  // A tab that could not be created or navigated: the browser answered, and
+  // what it said was no. A bridge that failed instead arrives as a BridgeError
+  // above, which is what carries the dispatched boundary.
+  if (failure instanceof TabLifecycleError) { return EXIT.TOOL_ERROR; }
   return EXIT.TRANSPORT;
 }
 
@@ -369,9 +514,14 @@ function classify(failure) {
     process.exitCode = await main();
   } catch (failure) {
     const exitCode = classify(failure);
-    const message = failure instanceof UsageError || failure instanceof BridgeError
-      ? failure.message
-      : `unexpected failure: ${failure && failure.message}`;
+    const known = failure instanceof UsageError || failure instanceof BridgeError
+      || failure instanceof ImageOutputError || failure instanceof TabLifecycleError;
+    let message = known ? failure.message : `unexpected failure: ${failure && failure.message}`;
+    // A tab deliberately left open is only useful if its id is said out loud,
+    // since the whole reason for keeping it is that someone has to look at it.
+    if (failure && failure.tabLeftOpen) {
+      message += ` Tab ${failure.tabId} was left open on purpose, because closing a tab whose outcome is unknown could discard what it was doing.`;
+    }
     try {
       if (asJson) { await writeOut(envelope(exitCode, message)); }
       else { await writeErr(`cic: ${message}\n`); }

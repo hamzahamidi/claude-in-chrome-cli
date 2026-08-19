@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.7.0 (unreleased)
+
+Adds three things a script could not do before: keep a tab for exactly one job and clean it up, get an image out to a file, and ask what is open without a bridge.
+
+`cic with-tab <url> <tool> [args]` makes a tab, navigates it, calls one tool against it and closes it. That is the shape most one-off scripts were assembling by hand out of `tabs_create_mcp`, a copied id and a `tabs_close_mcp` they had to remember. It fills in `tabId` and nothing else, so passing your own is a usage error rather than an argument that would be silently overwritten.
+
+The cleanup rule is the reason the helper exists, and it is fail-closed. **After an unknown outcome the tab is deliberately left open and its id is reported.** The request reached the browser, nobody knows whether it acted, and closing the tab could discard a half-finished action and destroy the only evidence of it. An ordinary tool error is the opposite case: the browser answered, so the tab is in a known state and gets closed. A cleanup that fails after the work succeeded is reported as a warning rather than promoted into a failure, because the caller did get what they asked for and a stray tab is untidy rather than wrong.
+
+Writing the helper turned up a contract question worth stating. When the bridge creates a tab but its reply does not say which id, a tab really does exist that nothing can address. That is exit 2, not 3: exit 3 promises the browser cannot have acted, and it is the one class `--retries` repeats, so classifying it there would have left a fresh orphan tab behind on every attempt. Its own regression test caught the first attempt getting this wrong.
+
+`--output <path>` writes the image in a result to a file, on `cic call` and `cic with-tab`. Until now a non-text part printed as `[image]` and the bytes were unreachable from a shell, which made a screenshot the one thing the CLI could ask for and not deliver. It looks for image content and knows nothing about which tool produced it, so `cic call` still owns no schema and this works for anything that returns a picture rather than for screenshots specifically.
+
+It refuses, and writes nothing, on no image, on more than one image and one destination, and on bytes that are not an image: the base64 has to be complete, the leading bytes have to match PNG, JPEG, GIF or WebP, and a declared type contradicting those bytes is a refusal instead of a guess. Node's base64 decoder is the reason the encoding is checked before it is decoded rather than after, since it skips characters it does not recognise and returns short bytes for a truncated tail, which is exactly what a cut-off transfer looks like. The write goes to a temporary file in the destination's own directory and is renamed into place, so an existing file survives every refusal and every failure. A path that exists always holds a whole image, because half a screenshot on disk looks like an answer.
+
+Those refusals exit 64. The browser did what it was asked and the file is what could not be produced, which is neither a tool error nor anything retryable, and 64 is the code for an invocation that cannot be completed as written. The alternative was a sixth exit code in a contract frozen since 0.4.0. The bridge also returns JPEG today whatever the destination is named, so a mismatch between the name and the bytes is reported on stderr rather than left for whoever opens the file.
+
+`cic tabs` answers what is open by reading Chrome and Chromium session files from disk, with no bridge, no handshake, no extension and no tab group: `list_open_tabs` as a command. Its test asserts that claim rather than describing it, by pointing the bridge binary at a path that does not exist and requiring exit 0 anyway.
+
+Redaction applies to `--json` as well as to the rendered text. `collect()` returns raw URLs and the rendering is what redacts them, so emitting that structure directly would have quietly turned the safe default off for whoever chose machine-readable output. A `--profile` that matches nothing is a usage error naming the profiles that do exist, rather than an answer indistinguishable from an empty browser.
+
+The SNSS reader moved out of `tabs_mcp.js` into `lib/session-tabs.js`, for the same reason the protocol moved into `BridgeSession` in 0.5.0: there are two consumers now, and the CLI should not have to load a file that also has a `main()`. The move is proved by the 53 parser checks and 13 handshake checks passing untouched, which is what re-exporting from the old path is for.
+
+The bundled skill also learned about `cic session` and `cic shell`, which it had never mentioned since 0.6.0 shipped them, alongside the new commands.
+
+Coverage rose to 97.06% of statements and 88.39% of branches, with 76 of 76 functions, and the floors moved to 97 and 88 to match. The tarball is 8 files and the plugin cache 10.
+
 ## 0.6.0 (2026-08-19)
 
 Adds `cic session --jsonl`: one connection, many calls, one JSON object per line each way. A one-shot `cic call` pays for a process and a handshake every time and starts with an empty tab group, so threading a `tabId` between steps meant re-creating the tab. A session keeps it.

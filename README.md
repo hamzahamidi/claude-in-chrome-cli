@@ -51,8 +51,10 @@ That puts `cic` on your PATH.
 ## Usage
 
 ```sh
-cic list                      # list available tools
-cic call <tool> [json-args]   # call a tool, arguments default to {}
+cic list                          # list available tools
+cic call <tool> [json-args]       # call a tool, arguments default to {}
+cic with-tab <url> <tool> [args]  # make a tab, navigate, call one tool, close it
+cic tabs                          # every open tab, read from disk without the bridge
 ```
 
 | Option | What it does |
@@ -60,8 +62,14 @@ cic call <tool> [json-args]   # call a tool, arguments default to {}
 | `--timeout <secs>` | Ceiling on how long to wait for the reply. Default 30. |
 | `--retries <n>` | Retry only failures that never reached the browser (exit 3). Default 0. |
 | `--json` | Print the raw result object, or one error object, on one line |
+| `--output <path>` | Write the image in the result to a file. `call` and `with-tab`. |
+| `--keep-tab` | Leave the tab open instead of closing it. `with-tab`. |
+| `--profile <name>` | Only this browser profile. `tabs`. |
+| `--full-urls` | Raw URLs instead of redacted origin and path. `tabs`. |
 | `-h`, `--help` | Usage |
 | `-v`, `--version` | Print the version |
+
+Each command takes only the options it can act on. `cic tabs --timeout 5` exits 64 rather than accepting a flag that could not mean anything, since nothing there can time out.
 
 `--timeout` is a ceiling, not a wait: `cic` returns the moment the reply lands, so a fast call costs what the browser costs and nothing more.
 
@@ -73,7 +81,7 @@ Exit codes are a contract, frozen from 0.4.0 onward:
 | `1` | The tool reported an error (a JSON-RPC error, or `isError: true`) |
 | `2` | Outcome unknown: the request was sent and no usable reply came back |
 | `3` | Failed before the request was sent, so the browser cannot have acted |
-| `64` | Usage error, or invalid arguments JSON |
+| `64` | Usage error, invalid arguments JSON, or a `--output` file that could not be produced |
 
 Only exit 3 is safe to retry automatically, which is the only thing `--retries` will retry. Exit 2 means the click, submit or script may already have run, so repeating it would be a second action rather than a second look at the first.
 
@@ -107,6 +115,42 @@ For driving it by hand, `cic shell` is the same connection with a prompt. One li
 ![A cic shell session making four calls over one connection: the tabId printed by the first reply is threaded into the three that follow. Each reply's tab context is elided.](docs/cic-demo-session.webp)
 
 That is a real session, recorded through a pty. The tab context every reply carries is elided from the recording, and [`docs/make-demo.js`](docs/make-demo.js) regenerates the image.
+
+### One tab, cleaned up after
+
+`cic with-tab` makes a tab, navigates it, calls one tool against it and closes it, which is the shape most one-off scripts were writing by hand.
+
+```sh
+cic with-tab https://example.com get_page_text
+cic with-tab https://example.com computer '{"action":"screenshot"}' --output shot.png
+```
+
+It fills in `tabId` and nothing else, so passing your own is a usage error rather than a silently ignored argument. `--keep-tab` leaves the tab for inspection.
+
+**After an unknown outcome the tab is deliberately left open**, and its id is printed. The request reached the browser and no usable reply came back, so closing the tab could discard a half-finished action and destroy the only evidence of it. An ordinary tool error is different: the browser answered, so the tab is closed as usual. A cleanup that fails after the work succeeded is reported as a warning and does not turn a success into a failure.
+
+### Getting an image out
+
+`--output <path>` writes the image in a result to a file, on `cic call` and `cic with-tab` alike. It looks for image content and knows nothing about which tool produced it, so `cic call` still owns no schema and this works for anything that returns a picture.
+
+```sh
+cic call computer '{"action":"screenshot","tabId":123}' --output shot.png
+```
+
+It refuses, and writes nothing at all, when the result carries no image, carries more than one, or carries bytes that are not an image: the base64 must be complete, the magic bytes must match a format it knows, and a declared type that contradicts those bytes is a refusal rather than a guess. The write itself goes to a temporary file in the destination's directory and is renamed into place, so an existing file survives every one of those refusals. A path that exists therefore always holds a whole image, because half a screenshot on disk looks like an answer.
+
+Those refusals exit 64. The browser did what it was asked and the file is what could not be produced, which is neither a tool error nor anything safe to retry, and the exit-code contract has been frozen since 0.4.0 rather than growing a sixth code. One thing worth knowing: the bridge returns JPEG today whatever you call the file, so `--output shot.png` reports on stderr that the name suggests a different format from the bytes it wrote.
+
+### What is open, without the bridge
+
+`cic tabs` is `list_open_tabs` as a command. It reads Chrome and Chromium session files straight from disk, so it needs no bridge, no handshake, no extension and no tab group, and it sees tabs the bridge cannot.
+
+```sh
+cic tabs
+cic tabs --json --profile Default
+```
+
+URLs are redacted to origin and path by default, in `--json` as well as in the text, since choosing machine-readable output is not a request to turn the safe default off. `--full-urls` opts out. A `--profile` that matches nothing is a usage error naming the profiles that do exist, rather than an answer that looks like an empty browser.
 
 ### Moving from `cic.sh`
 

@@ -34,7 +34,46 @@ class BridgeError extends Error {
   }
 }
 
+/**
+ * A tab could not be set up because the browser answered and said no. Always a
+ * tool error: the bridge worked, the tool refused. A bridge that fails instead
+ * raises BridgeError, which is what carries the dispatched boundary.
+ */
+class TabLifecycleError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'TabLifecycleError';
+  }
+}
+
 const isPlainObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
+
+const textOf = (result) => (result && result.content ? result.content : [])
+  .filter((part) => part && part.type === 'text')
+  .map((part) => part.text)
+  .join('\n');
+
+/**
+ * Digs the new tab's id out of what tabs_create_mcp said.
+ *
+ * This is the one place the client reads meaning out of the bridge's prose
+ * rather than out of a field, because the id is only ever reported in a
+ * sentence. It is deliberately narrow and it fails loudly: a silent miss here
+ * would send every later call to the wrong tab, or to no tab at all.
+ */
+function tabIdFrom(result) {
+  const match = /Tab ID:\s*(\d+)/.exec(textOf(result));
+  if (!match) {
+    // Dispatched, so exit 2 rather than 3. A tab was made and the reply simply
+    // did not say which one, which leaves a real tab nobody can address. Exit 3
+    // would claim the browser never acted and is the one class --retries will
+    // repeat, and repeating this creates a second orphan.
+    throw new BridgeError(
+      'the bridge created a tab but did not report its id, so it cannot be addressed or found again.',
+      { dispatched: true });
+  }
+  return Number(match[1]);
+}
 
 /** JSON-RPC requires the code to be an integer, and MCP the message a string. */
 function describeBadError(error) {
@@ -225,6 +264,80 @@ class BridgeSession {
   }
 
   /**
+   * Creates a tab, optionally navigates it, hands the tabId to `body`, and
+   * closes the tab when it is done.
+   *
+   * The cleanup rule is the point of this helper, and it is fail-closed. A tab
+   * is closed after success and after an ordinary tool error, because both mean
+   * the browser finished and said so. It is deliberately NOT closed after an
+   * unknown outcome: the request reached the browser and nobody knows whether it
+   * acted, so closing could discard a half-finished action and destroy the only
+   * evidence of what happened. The tab is left open and identified instead, on
+   * `tabId` and `tabLeftOpen` of the thrown error, so a caller can say which one.
+   *
+   * A cleanup failure after a successful body does not turn success into
+   * failure. The work the caller asked for finished; a stray tab is untidy, not
+   * a wrong answer, and it is reported through `tabWarning` on the result.
+   */
+  async withTab({ url, keepTab = false, timeoutSeconds } = {}, body) {
+    const created = await this.call('tools/call',
+      { name: 'tabs_create_mcp', arguments: {} }, { timeoutSeconds });
+    if (created.result.isError) {
+      throw new TabLifecycleError(`could not create a tab: ${textOf(created.result) || 'the tool reported an error'}`);
+    }
+    const tabId = tabIdFrom(created.result);
+
+    let leaveOpen = false;
+    try {
+      if (url !== undefined) {
+        const moved = await this.call('tools/call',
+          { name: 'navigate', arguments: { url, tabId } }, { timeoutSeconds });
+        if (moved.result.isError) {
+          throw new TabLifecycleError(
+            `could not navigate to ${url}: ${textOf(moved.result) || 'the tool reported an error'}`,
+            );
+        }
+      }
+      const outcome = await body(tabId);
+      if (!keepTab) {
+        const warning = await this.#closeTab(tabId, timeoutSeconds);
+        if (warning) { return { outcome, tabWarning: warning, tabId }; }
+      }
+      return { outcome, tabId };
+    } catch (failure) {
+      // Only a dispatched failure is unknown. One that never reached the
+      // browser leaves the tab in a known state, so it is still tidied up.
+      if (failure instanceof BridgeError && failure.dispatched) {
+        leaveOpen = true;
+        failure.tabId = tabId;
+        failure.tabLeftOpen = true;
+      }
+      if (!leaveOpen && !keepTab) {
+        await this.#closeTab(tabId, timeoutSeconds);
+      }
+      throw failure;
+    }
+  }
+
+  /**
+   * Closes a tab on the way out. Returns a description of what went wrong
+   * rather than throwing, because this runs while another outcome is already
+   * being reported and must not replace it.
+   */
+  async #closeTab(tabId, timeoutSeconds) {
+    try {
+      const closed = await this.call('tools/call',
+        { name: 'tabs_close_mcp', arguments: { tabId } }, { timeoutSeconds });
+      if (closed.result.isError) {
+        return `tab ${tabId} may still be open: ${textOf(closed.result) || 'the tool reported an error'}`;
+      }
+      return null;
+    } catch (failure) {
+      return `tab ${tabId} may still be open: ${failure.message}`;
+    }
+  }
+
+  /**
    * SIGTERM, then SIGKILL if that is ignored, and wait for the child to go.
    *
    * Releasing the pipes is not optional cleanup. A descendant of the bridge can
@@ -378,7 +491,9 @@ class BridgeSession {
 module.exports = {
   BridgeSession,
   BridgeError,
+  TabLifecycleError,
   describeBadReply,
+  tabIdFrom,
   SUPPORTED_PROTOCOLS,
   TERMINATE_GRACE_MS,
 };

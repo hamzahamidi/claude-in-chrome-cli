@@ -110,6 +110,85 @@ function replyTo(message) {
     return;
   }
 
+  // The tab lifecycle. withTab needs three tools to answer differently within
+  // one session, which no single-reply mode can express, so these dispatch on
+  // the tool name. What the test reads back is the capture file: it is the only
+  // way to prove from outside whether the close actually happened, which is the
+  // behaviour the fail-closed rule is about.
+  if (mode.startsWith('tabs-')) {
+    const name = (message.params || {}).name;
+    const ok = (text) => send({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text }] } });
+    const refuse = (text) => send({
+      jsonrpc: '2.0', id, result: { content: [{ type: 'text', text }], isError: true },
+    });
+
+    if (name === 'tabs_create_mcp') {
+      if (mode === 'tabs-no-id') { ok('Created new tab.'); return; }
+      if (mode === 'tabs-create-error') { refuse('no tab available'); return; }
+      ok('Created new tab. Tab ID: 4242');
+      return;
+    }
+    if (name === 'navigate') {
+      if (mode === 'tabs-navigate-error') { refuse('that url is blocked'); return; }
+      ok('Navigated to the url');
+      return;
+    }
+    if (name === 'tabs_close_mcp') {
+      if (mode === 'tabs-close-error') { refuse('that tab is gone already'); return; }
+      ok('Closed tab 4242. 0 tab(s) remain.');
+      return;
+    }
+    // Whatever the caller asked for inside the tab.
+    if (mode === 'tabs-body-unknown') { return; }
+    if (mode === 'tabs-body-error') { refuse('the body tool refused'); return; }
+    ok('body ran against tab 4242');
+    return;
+  }
+
+  // Image results, for --output. Only the leading magic bytes decide the
+  // format, so filler after them is enough to exercise every branch except the
+  // PNG case, which uses a real 1x1 file.
+  if (mode.startsWith('image-')) {
+    const REAL_PNG_1x1 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==';
+    const jpegBytes = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(60, 7)]);
+    const part = (extra) => ({ type: 'image', ...extra });
+    const reply = (content) => send({ jsonrpc: '2.0', id, result: { content } });
+
+    if (mode === 'image-png') {
+      reply([{ type: 'text', text: 'here is the shot' }, part({ data: REAL_PNG_1x1, mimeType: 'image/png' })]);
+      return;
+    }
+    if (mode === 'image-unlabelled') { reply([part({ data: REAL_PNG_1x1 })]); return; }
+    if (mode === 'image-jpeg-labelled-png') {
+      reply([part({ data: jpegBytes.toString('base64'), mimeType: 'image/png' })]);
+      return;
+    }
+    if (mode === 'image-truncated') {
+      // A base64 body whose length is not a multiple of four: what a cut-off
+      // transfer looks like, and what Node's decoder accepts without complaint.
+      reply([part({ data: REAL_PNG_1x1.slice(0, 41), mimeType: 'image/png' })]);
+      return;
+    }
+    if (mode === 'image-not-base64') { reply([part({ data: 'not base64 at all!!', mimeType: 'image/png' })]); return; }
+    if (mode === 'image-no-data') { reply([part({ mimeType: 'image/png' })]); return; }
+    if (mode === 'image-garbage') {
+      reply([part({ data: Buffer.alloc(40, 3).toString('base64'), mimeType: 'image/png' })]);
+      return;
+    }
+    if (mode === 'image-two') {
+      reply([part({ data: REAL_PNG_1x1 }), part({ data: REAL_PNG_1x1 })]);
+      return;
+    }
+    if (mode === 'image-none') { reply([{ type: 'text', text: 'no picture here' }]); return; }
+    if (mode === 'image-is-error') {
+      send({
+        jsonrpc: '2.0', id,
+        result: { content: [{ type: 'text', text: 'the tool refused' }], isError: true },
+      });
+      return;
+    }
+  }
+
   if (mode === 'never-reply') { return; }
 
   // A result far larger than a pipe buffer. Truncation here is silent data
