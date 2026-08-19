@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.6.0 (unreleased)
+
+Adds `cic session --jsonl`: one connection, many calls, one JSON object per line each way. A one-shot `cic call` pays for a process and a handshake every time and starts with an empty tab group, so threading a `tabId` between steps meant re-creating the tab. A session keeps it.
+
+The response record is the frozen 0.4.0 envelope with an id added, rather than a second vocabulary: success is `{id, exit: 0, result}`, failure is `{id, error: true, kind, exit, message}`. A caller that already parses `cic call --json` needs no new branches. The id is the caller's and is echoed back untouched; `cic` never invents one.
+
+Because a persistent process has one exit status and many calls, each record carries its own outcome and the process exit code describes only the session: 0 clean shutdown, 2 a call whose outcome was unknown ended it, 3 it never started. A malformed line is that line's problem and a tool error is that call's problem, both reported and survived. An unknown outcome is fatal by design: the request was sent, nobody knows whether the browser acted, and allowing a later call to race it is precisely what the exit-code split exists to prevent. There is deliberately no flag to continue past one.
+
+Calls are serial and stdin is paused while one is in flight, so a fast producer cannot grow an unbounded backlog in memory. `cic shell` is the same connection with a prompt, and is deliberately dumb: no variables, captures, aliases, implicit current tab or control flow, because the program driving the JSONL interface already has those.
+
+This also cashes in the limit 0.5.0 recorded. Each request used to own its own reader and buffer, so bytes arriving between calls were dropped; serialized one-shot use never noticed, and a streaming session would have. There is now one reader for the session with a per-id waiter map, and `dispatched` became per-call rather than per-session, because in a long-lived session one unknown outcome must not relabel the classification of every later call.
+
+Two bugs came out of building it, both of which only appear with piped input, which is how a program will actually drive this. Readline emits every piped line and fires `close` at end of input before the first call has finished, so the shell's trailing `prompt()` hit a closed interface, threw `ERR_USE_AFTER_CLOSE`, and that rejection poisoned the queue: every line after the first was silently skipped, while the process still exited 0. Prompting is now guarded and each queued line catches its own failure. Separately, `.exit` did not stop work already queued behind it, for the same reason: the lines had all been emitted before any of them ran. Stopping now means stopping, including what is already queued.
+
+Review found two more, both about the session as a long-lived process rather than as a protocol. A fatal session emitted its `unknown_outcome` record and then did not exit: readline was closed but stdin had been paused by hand and stayed referenced, so the process waited for whoever was writing to it to finish. Measured at eight seconds against a writer holding the pipe, and now one. Every earlier test missed it structurally, because passing input through `spawnSync` closes stdin immediately and the condition never arose.
+
+The second was that backpressure was half-implemented. Reads were paced by the bridge, but records went out through unchecked `write()` calls, so with stdout unread forty one-megabyte replies were all accepted and buffered: 142 MB of resident memory. Each record is now handed over before the next request is taken, and the test asserts what actually matters, that memory does not grow with the number of queued requests: twenty requests and two hundred both peak around 64 MB.
+
+Windows gets its own coverage floor rather than none. Removing enforcement there was the wrong answer to a real platform difference: it would have let a genuine Windows regression through unnoticed. Its measured baseline supports 95 lines and 87 branches, rounded down the same way the POSIX numbers were.
+
+Flags a command cannot act on are now usage errors. `cic list --jsonl`, `cic session --jsonl --retries 3` and `cic shell --json` all exited 0 while quietly doing something other than what was asked; each command declares what it understands and anything else exits 64.
+
+Coverage rose rather than dipped, once the paths this release added were actually reached: 95.98% to 96.55% of statements and 85.33% to 86.54% of branches, with the floors raised to 96 and 86 to match. The first pass through this release did dip to 95.64%, because the shell's error paths, a `tools/list` entry whose description is not a string, and a reply arriving with no trailing newline were all unreached; each now has a test. What is left uncovered is defensive: two `classify` fallbacks for a non-BridgeError, the queue catches that keep one bad record from stopping the rest, a synchronous `spawn` throw, and a non-EPIPE write rejection. Reaching those would mean adding test-only seams to the code, which is a worse trade than an honest gap. The coverage floor is now enforced on the POSIX legs only: Windows skips the EPIPE pipeline and detached-descendant tests by design, so it reaches 95.7% where macOS and Linux reach 96.54%, and gating it on a full-suite number would fail for a reason that is not a regression. It still reports its figure. The tarball is 6 files and the plugin cache 8.
+
 ## 0.5.0 (2026-08-18)
 
 Moves the MCP protocol out of the command line into one internal `BridgeSession`: spawn the child, negotiate initialization in the order the specification requires, allocate request ids, validate replies before anyone reads them, and terminate and reap the child on the way out. `cic list` and `cic call` are now create-session, one call, close. What is left in `bin/cic.js` is arguments, output, retries and the exit-code contract.

@@ -395,6 +395,21 @@ for (const mode of CALL_MODES) {
     true);
 }
 
+// ---- replies that need the reader's final flush ---------------------------
+
+// A complete reply with no trailing newline, then end of stream. Without the
+// final flush this reads as no reply at all.
+check('a reply with no trailing newline is still a reply',
+  run(['call', 'navigate', '{}'], { mode: 'no-trailing-newline', timeoutSeconds: 3 }).status, 0);
+check('and its content is delivered intact',
+  run(['call', 'navigate', '{}'], { mode: 'no-trailing-newline', timeoutSeconds: 3 }).stdout.trim(),
+  'stub replied');
+
+// A tool whose description is present but not a string: the array and names are
+// fine, so only member validation catches it.
+check('a tool with a non-string description is unknown',
+  run(['list'], { mode: 'tool-bad-description', timeoutSeconds: 3 }).status, 2);
+
 // ---- retries, and only where retrying is safe ------------------------------
 
 // A handshake that fails twice then succeeds. Retrying is safe here precisely

@@ -1,10 +1,15 @@
 {
-  "include": ["plugins/claude-in-chrome/**/*.js"],
+  "include": [
+    "plugins/claude-in-chrome/**/*.js"
+  ],
   "all": true,
-  "reporter": ["text-summary", "lcovonly"],
+  "reporter": [
+    "text-summary",
+    "lcovonly"
+  ],
   "report-dir": "coverage",
   "temp-directory": "node_modules/.cache/c8",
-  "lines": 94,
-  "branches": 82,
-  "functions": 95
+  "lines": 96,
+  "branches": 86,
+  "functions": 98
 }
