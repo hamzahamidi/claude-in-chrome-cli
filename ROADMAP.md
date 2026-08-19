@@ -109,14 +109,22 @@ Theme: many calls over one live MCP connection, without a background process.
 
 Non-goal: no `batch` workflow language. Captures, references, dependencies, interpolation, conditions and loops belong to the calling program unless real usage later justifies a separate design.
 
-## v0.7.0: tab lifecycle and useful output
+## v0.7.0: tab lifecycle and useful output (shipped 2026-08-20)
 
 Theme: solve lifecycle and transport gaps before adding spelling shortcuts.
 
-- Add a library-level `withTab` helper on `BridgeSession`: create, navigate, hand the `tabId` to a callback, and close on success or ordinary tool error. Unknown outcomes get an explicit fail-closed cleanup policy, and `keepTab: true` preserves the tab for debugging. Its behavior is tested before a CLI spelling is frozen.
+- Add a library-level `withTab` helper: create, navigate, hand the `tabId` to a callback, and close on success or ordinary tool error. Unknown outcomes get an explicit fail-closed cleanup policy, and `keepTab: true` preserves the tab for debugging.
 - Add screenshot-to-file output, including binary validation, atomic writes and refusal to corrupt a destination after a malformed or partial result.
 - Add `cic tabs` as a direct facade over the local session parser; it does not spawn the MCP bridge for a read that only needs the filesystem.
-- Expose a narrow tab-lifecycle CLI only after the helper contract is proven. The roadmap deliberately does not invent nested command syntax or a mini workflow language in advance.
+- Expose a narrow tab-lifecycle CLI. The roadmap deliberately does not invent nested command syntax or a mini workflow language in advance.
+
+Two things shipped differently from the plan above, both deliberately.
+
+The helper went to `lib/tab-lifecycle.js` rather than onto `BridgeSession`, as this section originally said. `BridgeSession` is the generic protocol layer, and hanging `withTab` off it taught that class the names `tabs_create_mcp`, `navigate` and `tabs_close_mcp`, which is the boundary the 0.5.0 extraction existed to draw. It ends 0.7.0 byte-identical to how it started.
+
+The CLI spelling landed in the same release as the helper rather than a later one. The original sequencing existed so a spelling could not be frozen around an unproven contract; a helper with no caller outside its own tests is the opposite failure, so `cic with-tab` shipped alongside and the contract is proven by both. What the ordering was actually protecting held anyway: the fail-closed rule was reviewed and corrected twice before release, once for reading a JSON-RPC error as a result and once for discarding a cleanup warning.
+
+The "partial result" clause in the file-output bullet turned out to be the hard half. Valid base64 carrying the right magic bytes says nothing about where a file ends, so each format is asked for its own terminator rather than trusting its header.
 
 Deferred, not rejected: `navigate`, `text`, `find` and `js`. They improve discoverability and avoid nested JSON quoting, especially in PowerShell, but they do not precede connection, lifecycle and file-output capabilities.
 
