@@ -97,7 +97,7 @@ Theme: one protocol implementation, proven on every supported platform.
 
 Non-goals: no long-lived public mode, no workflow syntax, no daemon, and no friendly tool aliases. This release changes the implementation boundary and makes the platform claim real without changing the one-shot contract.
 
-## v0.6.0: foreground sessions
+## v0.6.0: foreground sessions (shipped 2026-08-19)
 
 Theme: many calls over one live MCP connection, without a background process.
 
@@ -105,7 +105,7 @@ Theme: many calls over one live MCP connection, without a background process.
 - A persistent process cannot report every call through its own exit status. Each response envelope therefore carries the one-shot classification (`exit`, `kind`, result or message), while the process exit code describes only startup, clean shutdown or a fatal session failure.
 - Calls are processed serially. An exit-2 unknown outcome is fatal to the session by default: emit its record, close and reap the bridge, and require a fresh session so a later action cannot silently race an earlier action whose outcome is unknown.
 - `cic shell` is a small human REPL over the same streaming interface. It initially has no variables, captures, aliases, implicit current tab or control flow.
-- The JSONL protocol and its backpressure, malformed-input and shutdown behavior are driven by offline tests on all three operating systems.
+- The JSONL protocol and its backpressure, malformed-input and shutdown behavior are driven by offline tests on all three operating systems. The one exception is the probe that measures resident memory to prove backpressure bounds it: it needs `ps`, so it runs on macOS and Linux and prints a visible skip on Windows rather than a pass it did not earn.
 
 Non-goal: no `batch` workflow language. Captures, references, dependencies, interpolation, conditions and loops belong to the calling program unless real usage later justifies a separate design.
 
