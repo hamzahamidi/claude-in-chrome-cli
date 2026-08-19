@@ -44,16 +44,17 @@ jobs:
         run: npx c8 --no-clean --reporter=none node test/test_session_command.js
       - name: cic contract, handshake ordering and retries
         run: npx c8 --no-clean --reporter=none node test/test_cic_cli.js
-      # The floor measures the whole suite, and Windows deliberately runs less
-      # of it: the EPIPE pipeline and detached-descendant tests are POSIX-only,
-      # so the paths they exercise are legitimately unreached there. Judging
-      # Windows against the full-suite number fails for a reason that is not a
-      # regression, so it reports without gating while the POSIX legs enforce.
+      # Windows deliberately runs less of the suite: the EPIPE pipeline and
+      # detached-descendant tests are POSIX-only, so the paths they exercise are
+      # legitimately unreached there. That calls for a floor of its own, not for
+      # no floor: removing enforcement would let a real Windows regression
+      # through unnoticed. The numbers are its measured baseline rounded down,
+      # the same way the POSIX ones were.
       - name: coverage report and floors
         shell: bash
         run: |
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            npx c8 report
+            npx c8 report --check-coverage --lines 95 --branches 87 --functions 98
           else
             npx c8 report --check-coverage
           fi

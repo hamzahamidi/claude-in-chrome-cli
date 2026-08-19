@@ -94,6 +94,48 @@ check('no record is emitted for the line behind it',
   unknown.records.some((r) => r.id === 'second'), false);
 check('and the process exit code says the session died of it', unknown.status, 2);
 
+// A fatal session must end the process, not sit waiting for the writer at the
+// other end of stdin to finish. Every test above passes input through spawnSync,
+// which closes stdin immediately and so cannot see this: the record arrived and
+// then nothing happened for as long as the caller kept the pipe open.
+{
+  // Measured in a child with its own event loop. Two earlier attempts measured
+  // the wrong thing: timing a shell pipeline timed the `sleep` holding the pipe
+  // open, and polling child.exitCode from a busy loop could never see the exit,
+  // because execSync blocks the very loop that would deliver it.
+  const probe = `
+    const { spawn } = require('child_process');
+    const child = spawn(process.argv[1], [process.argv[2], 'session', '--jsonl', '--timeout', '2'], {
+      stdio: ['pipe', 'pipe', 'ignore'],
+      env: { ...process.env, CIC_STUB_MODE: 'exit-early' },
+    });
+    let out = '';
+    child.stdout.on('data', (c) => { out += c; });
+    child.stdin.write('{"id":"first","tool":"navigate"}\\n');
+    // stdin stays open on purpose: that is the condition under test.
+    const started = Date.now();
+    const giveUp = setTimeout(() => {
+      console.log(JSON.stringify({ exited: false, ms: Date.now() - started, code: null, out }));
+      child.kill('SIGKILL');
+      process.exit(0);
+    }, 8000);
+    child.on('exit', (code) => {
+      clearTimeout(giveUp);
+      console.log(JSON.stringify({ exited: true, ms: Date.now() - started, code, out }));
+    });
+  `;
+  const probed = spawnSync(process.execPath, ['-e', probe, process.execPath, CIC], {
+    encoding: 'utf8',
+    env: { ...process.env, CIC_CLAUDE_BIN: process.execPath, CIC_CLAUDE_ARGS: STUB },
+  });
+  let seen = {};
+  try { seen = JSON.parse(probed.stdout.trim().split('\n').pop()); } catch { seen = {}; }
+  check('a fatal session exits while stdin is still open', seen.exited, true);
+  check('and does so promptly rather than waiting for the writer', seen.ms < 5000, true);
+  check('with the session exit code', seen.code, 2);
+  check('having emitted the record first', /unknown_outcome/.test(seen.out || ''), true);
+}
+
 // ---- malformed input is that record's problem ----------------------------
 
 const bad = jsonl([
@@ -183,6 +225,68 @@ check('and the shell carries on to the next line',
 const shellToolError = run(['shell', '--timeout', '2'], ['navigate'], { mode: 'tool-error' });
 check('a tool error is printed in the shell', /tool blew up/.test(shellToolError.stdout), true);
 check('and the shell still exits 0, since the session is healthy', shellToolError.status, 0);
+
+// ---- a blocked consumer must not become unbounded memory ------------------
+
+// Reads were paced by the bridge and writes by nothing, so with stdout unread
+// forty one-megabyte replies were all accepted and buffered. What matters is not
+// the absolute figure but that it does not grow with the number of requests.
+{
+  const { spawn, execSync } = require('child_process');
+  const peakFor = (count) => {
+    const child = spawn(process.execPath, [CIC, 'session', '--jsonl', '--timeout', '20'], {
+      stdio: ['pipe', 'pipe', 'ignore'],
+      env: {
+        ...process.env,
+        CIC_CLAUDE_BIN: process.execPath,
+        CIC_CLAUDE_ARGS: STUB,
+        CIC_STUB_MODE: 'big',
+      },
+    });
+    // Deliberately never read stdout.
+    let peak = 0;
+    const deadline = Date.now() + 3000;
+    for (let i = 0; i < count; i++) {
+      child.stdin.write(JSON.stringify({ id: i, tool: 'get_page_text' }) + '\n');
+    }
+    while (Date.now() < deadline) {
+      try {
+        const rss = Number(execSync(`ps -o rss= -p ${child.pid}`).toString().trim());
+        if (rss > peak) { peak = rss; }
+      } catch { break; }
+      try { execSync('sleep 0.2'); } catch { break; }
+    }
+    child.kill('SIGKILL');
+    return peak;
+  };
+  const small = peakFor(20);
+  const large = peakFor(200);
+  // Ten times the requests must not mean anything like ten times the memory.
+  check('memory does not grow with queued requests when stdout is unread',
+    large < small * 2, true);
+  if (!(large < small * 2)) {
+    console.log(`        20 requests peaked at ${small} KB, 200 at ${large} KB`);
+  }
+}
+
+// ---- a command refuses flags it would otherwise ignore --------------------
+
+for (const [args, why] of [
+  [['list', '--jsonl'], 'list has no streaming mode'],
+  [['call', 'navigate', '{}', '--jsonl'], 'call has no streaming mode'],
+  [['session', '--jsonl', '--retries', '3'], 'retrying inside a session is not defined'],
+  [['session', '--jsonl', '--json'], 'session already emits JSON per line'],
+  [['shell', '--json'], 'the shell prints for a human'],
+  [['shell', '--jsonl'], 'the shell is not the streaming protocol'],
+]) {
+  check(`${args.join(' ')} is a usage error, since ${why}`, run(args, []).status, 64);
+}
+
+// The combinations each command does understand still work.
+check('list --json is accepted', run(['list', '--json'], []).status, 0);
+check('session --jsonl --timeout is accepted',
+  jsonl(['{"id":"a","tool":"navigate"}']).status, 0);
+check('shell --timeout is accepted', run(['shell', '--timeout', '2'], ['.exit']).status, 0);
 
 console.log(failures ? `\n${failures} failed` : '\nall passed');
 process.exit(failures ? 1 : 0);

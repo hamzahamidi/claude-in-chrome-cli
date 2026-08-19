@@ -62,6 +62,26 @@ function failureRecord(id, exitCode, message) {
   });
 }
 
+/**
+ * Writes one line and resolves when the stream has actually taken it.
+ *
+ * An unchecked write() returns false once the consumer stops keeping up and
+ * buffers the rest in memory. With stdout unread, forty one-megabyte replies
+ * were all accepted and the process reached 142 MB: the reads were paced by the
+ * bridge, but nothing paced the writes. Awaiting this before resuming stdin is
+ * what makes the whole loop bounded rather than only half of it.
+ */
+function writeLine(output, text) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = () => { if (!settled) { settled = true; resolve(); } };
+    // A consumer that goes away is not our failure; stop waiting for it.
+    output.once('error', done);
+    if (output.write(text)) { done(); return; }
+    output.once('drain', done);
+  });
+}
+
 function classify(failure) {
   if (failure instanceof BridgeError) { return failure.dispatched ? EXIT.UNKNOWN : EXIT.TRANSPORT; }
   return EXIT.TRANSPORT;
@@ -78,7 +98,7 @@ async function runSession({ timeoutSeconds, input, output, jsonl }) {
   try {
     await session.open();
   } catch (failure) {
-    output.write(failureRecord(null, classify(failure), failure.message) + '\n');
+    await writeLine(output, failureRecord(null, classify(failure), failure.message) + '\n');
     await session.close();
     return classify(failure);
   }
@@ -99,13 +119,13 @@ async function runSession({ timeoutSeconds, input, output, jsonl }) {
 
       let record;
       try { record = JSON.parse(trimmed); } catch (failure) {
-        output.write(failureRecord(null, EXIT.USAGE, `line is not valid JSON: ${failure.message}`) + '\n');
+        await writeLine(output, failureRecord(null, EXIT.USAGE, `line is not valid JSON: ${failure.message}`) + '\n');
         return;
       }
 
       const plan = planRecord(record);
       if (plan.error) {
-        output.write(failureRecord(isPlainObject(record) ? record.id ?? null : null, EXIT.USAGE, plan.error) + '\n');
+        await writeLine(output, failureRecord(isPlainObject(record) ? record.id ?? null : null, EXIT.USAGE, plan.error) + '\n');
         return;
       }
 
@@ -115,18 +135,18 @@ async function runSession({ timeoutSeconds, input, output, jsonl }) {
           { timeoutSeconds: plan.timeout });
 
         if (reply.error) {
-          output.write(failureRecord(plan.id, EXIT.TOOL_ERROR, reply.error.message) + '\n');
+          await writeLine(output, failureRecord(plan.id, EXIT.TOOL_ERROR, reply.error.message) + '\n');
           return;
         }
         if (reply.result.isError) {
-          output.write(failureRecord(plan.id, EXIT.TOOL_ERROR,
+          await writeLine(output, failureRecord(plan.id, EXIT.TOOL_ERROR,
             textOf(reply.result) || 'the tool reported an error') + '\n');
           return;
         }
-        output.write(successRecord(plan.id, reply.result) + '\n');
+        await writeLine(output, successRecord(plan.id, reply.result) + '\n');
       } catch (failure) {
         const code = classify(failure);
-        output.write(failureRecord(plan.id, code, failure.message) + '\n');
+        await writeLine(output, failureRecord(plan.id, code, failure.message) + '\n');
         // An unknown outcome ends the session. The request was sent and nobody
         // knows whether the browser acted on it, so continuing would let a
         // later call race an earlier one whose effect is undetermined. The
@@ -134,16 +154,29 @@ async function runSession({ timeoutSeconds, input, output, jsonl }) {
         if (code === EXIT.UNKNOWN) {
           fatal = true;
           exitCode = EXIT.UNKNOWN;
-          lines.close();
+          stopReading();
         }
       }
     }).catch((failure) => {
       // A crash handling one record is that record's problem, reported and
       // survived, rather than a silent hole in every record queued behind it.
       output.write(failureRecord(null, EXIT.TRANSPORT, `failed handling a record: ${failure && failure.message}`) + '\n');
+      /* not awaited: this is the last-resort path and must never itself hang */
     });
     return queue;
   };
+
+  // Closing readline is not enough to end the process. stdin was paused by hand
+  // and stays referenced while it is open, so a fatal session sat there until the
+  // writer at the other end happened to close: the record was emitted and then
+  // nothing happened for as long as the caller kept the pipe. Releasing stdin is
+  // what actually lets the process leave.
+  function stopReading() {
+    lines.close();
+    try { input.pause?.(); } catch { /* already gone */ }
+    try { input.unref?.(); } catch { /* not refcounted */ }
+    try { input.destroy?.(); } catch { /* already destroyed */ }
+  }
 
   await new Promise((resolve) => {
     lines.on('line', (line) => {
@@ -153,6 +186,7 @@ async function runSession({ timeoutSeconds, input, output, jsonl }) {
     lines.on('close', () => { queue.then(resolve, resolve); });
   });
   await queue.catch(() => {});
+  stopReading();
   await session.close();
   return exitCode;
 }

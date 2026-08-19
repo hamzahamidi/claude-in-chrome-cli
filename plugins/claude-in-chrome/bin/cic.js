@@ -76,6 +76,26 @@ Exit codes:
 
 class UsageError extends Error {}
 
+// A flag a command cannot act on is a mistake worth reporting, not one worth
+// ignoring: `cic list --jsonl` used to exit 0 having quietly done something
+// other than what was asked for.
+const FLAGS_BY_COMMAND = {
+  list: new Set(['--json', '--timeout', '--retries']),
+  call: new Set(['--json', '--timeout', '--retries']),
+  session: new Set(['--jsonl', '--timeout']),
+  shell: new Set(['--timeout']),
+};
+
+function rejectUnsupportedFlags(command, provided) {
+  const allowed = FLAGS_BY_COMMAND[command];
+  if (!allowed) { return; }
+  const wrong = [...provided].filter((flag) => !allowed.has(flag));
+  if (wrong.length) {
+    throw new UsageError(
+      `${command} does not take ${wrong.join(', ')}. It understands ${[...allowed].join(', ')}.`);
+  }
+}
+
 // Nothing here calls process.exit() after writing. Writing to a pipe is
 // asynchronous, and exiting discards whatever has not drained yet, which
 // truncated a large page-text result at the pipe buffer boundary. Every path
@@ -136,6 +156,10 @@ const sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
 
 function parseArguments(argv) {
   const options = { timeout: DEFAULT_TIMEOUT_SECONDS, retries: 0, json: false, jsonl: false };
+  // Which flags were actually typed, as opposed to left at a default. A command
+  // can then refuse one it would silently ignore, rather than exiting 0 having
+  // done something other than what was asked.
+  const provided = new Set();
   const positional = [];
   // Scanning continues past the first mistake so that `--json` is still seen,
   // and a --json caller gets the error envelope rather than a bare exit code.
@@ -155,14 +179,15 @@ function parseArguments(argv) {
 
   for (let i = 0; i < argv.length; i++) {
     const argument = argv[i];
-    if (argument === '--json') { options.json = true; }
-    else if (argument === '--jsonl') { options.jsonl = true; }
+    if (argument === '--json') { options.json = true; provided.add('--json'); }
+    else if (argument === '--jsonl') { options.jsonl = true; provided.add('--jsonl'); }
     else if (argument === '-h' || argument === '--help') { options.help = true; }
     else if (argument === '-v' || argument === '--version') { options.version = true; }
     else if (argument === '--timeout') {
       const raw = valueFor('--timeout', i);
       if (raw === null) { continue; }
       i++;
+      provided.add('--timeout');
       const value = Number(raw);
       if (!Number.isFinite(value) || value <= 0) {
         note(`--timeout wants a positive number of seconds, got ${raw}`);
@@ -173,6 +198,7 @@ function parseArguments(argv) {
       const raw = valueFor('--retries', i);
       if (raw === null) { continue; }
       i++;
+      provided.add('--retries');
       const value = Number(raw);
       if (!Number.isInteger(value) || value < 0) {
         note(`--retries wants a whole number of attempts, got ${raw}`);
@@ -185,7 +211,7 @@ function parseArguments(argv) {
       positional.push(argument);
     }
   }
-  return { options, positional, error };
+  return { options, positional, provided, error };
 }
 
 /** Decides what the command means, before anything is spawned. */
@@ -236,7 +262,7 @@ async function attempt(plan, options) {
 }
 
 async function main() {
-  const { options, positional, error } = parseArguments(process.argv.slice(2));
+  const { options, positional, provided, error } = parseArguments(process.argv.slice(2));
   if (error) { throw new UsageError(error); }
 
   if (options.version) { await writeOut(VERSION + '\n'); return EXIT.OK; }
@@ -244,6 +270,9 @@ async function main() {
 
   // The streaming commands own their own loop and their own exit meaning, so
   // they return before any of the one-shot machinery below.
+  if (positional[0] === 'session' || positional[0] === 'shell') {
+    rejectUnsupportedFlags(positional[0], provided);
+  }
   if (positional[0] === 'session') {
     if (positional.length > 1) {
       throw new UsageError(`session takes no positional arguments, got '${positional[1]}'.`);
@@ -270,6 +299,7 @@ async function main() {
   }
 
   const plan = planRequest(positional);
+  rejectUnsupportedFlags(plan.command, provided);
 
   let reply;
   // Retries are limited to failures that never reached the browser. After
