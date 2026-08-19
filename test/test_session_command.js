@@ -16,6 +16,14 @@ const STUB = path.join(HERE, 'stub_server.js');
 
 let failures = 0;
 
+// Printed, never silent. A suite that quietly covers less on one platform is how
+// a support claim outruns its evidence.
+let skipped = 0;
+function skip(label, why) {
+  skipped++;
+  console.log(`skip  ${label} — ${why}`);
+}
+
 function check(label, actual, expected) {
   const ok = actual === expected;
   if (!ok) { failures++; }
@@ -231,7 +239,15 @@ check('and the shell still exits 0, since the session is healthy', shellToolErro
 // Reads were paced by the bridge and writes by nothing, so with stdout unread
 // forty one-megabyte replies were all accepted and buffered. What matters is not
 // the absolute figure but that it does not grow with the number of requests.
-{
+// Measuring another process's resident memory needs `ps`, and pacing the samples
+// needs `sleep`; neither exists on Windows, where execSync simply threw and both
+// measurements came back zero, which the comparison then read as a pass waiting
+// to happen. The behaviour under test is OS-agnostic, so proving it on the two
+// platforms that can measure it is honest, and claiming it on the third is not.
+if (process.platform === 'win32') {
+  skip('memory does not grow with queued requests when stdout is unread',
+    'needs ps and sleep to measure another process');
+} else {
   const { spawn, execSync } = require('child_process');
   const peakFor = (count) => {
     const child = spawn(process.execPath, [CIC, 'session', '--jsonl', '--timeout', '20'], {
@@ -262,9 +278,12 @@ check('and the shell still exits 0, since the session is healthy', shellToolErro
   const small = peakFor(20);
   const large = peakFor(200);
   // Ten times the requests must not mean anything like ten times the memory.
+  // Both being zero would satisfy that trivially, so the measurement has to be
+  // shown to have worked at all.
+  check('the memory probe actually measured something', small > 0, true);
   check('memory does not grow with queued requests when stdout is unread',
-    large < small * 2, true);
-  if (!(large < small * 2)) {
+    small > 0 && large < small * 2, true);
+  if (!(small > 0 && large < small * 2)) {
     console.log(`        20 requests peaked at ${small} KB, 200 at ${large} KB`);
   }
 }
@@ -288,5 +307,7 @@ check('session --jsonl --timeout is accepted',
   jsonl(['{"id":"a","tool":"navigate"}']).status, 0);
 check('shell --timeout is accepted', run(['shell', '--timeout', '2'], ['.exit']).status, 0);
 
-console.log(failures ? `\n${failures} failed` : '\nall passed');
+console.log(failures
+  ? `\n${failures} failed${skipped ? `, ${skipped} skipped` : ''}`
+  : `\nall passed${skipped ? `, ${skipped} skipped` : ''}`);
 process.exit(failures ? 1 : 0);
