@@ -288,6 +288,29 @@ if (process.platform === 'win32') {
   }
 }
 
+// ---- a long session must not accumulate listeners -------------------------
+
+// Every record used to attach an 'error' listener to stdout that was only
+// detached if an error actually fired, so a successful write left one behind.
+// Fifteen records was enough for Node to warn about a probable leak, in exactly
+// the mode built for staying open. Node's own warning is the assertion here
+// because listener counts live inside the child; it appears once per emitter, so
+// its absence across two hundred records is the property worth pinning.
+//
+// This is the same shape as the per-request listeners removed from BridgeSession
+// in 0.5.0, and it survived because that suite watches the bridge child's stdout
+// while this one is the session's own output stream.
+{
+  const many = Array.from({ length: 200 }, (_, i) => JSON.stringify({ id: i, tool: 'navigate' }));
+  const long = jsonl(many);
+  check('two hundred records all answer', long.records.length, 200);
+  check('and Node never warns about a listener leak',
+    /MaxListenersExceededWarning/.test(long.stderr || ''), false);
+  if (/MaxListenersExceededWarning/.test(long.stderr || '')) {
+    console.log(`        ${(long.stderr || '').split('\n')[0]}`);
+  }
+}
+
 // ---- a command refuses flags it would otherwise ignore --------------------
 
 for (const [args, why] of [
