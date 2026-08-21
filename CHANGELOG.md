@@ -16,7 +16,11 @@ Three of its rules come from measuring a live bridge before any of it was writte
 
 The anchor is also deliberately plain. A first attempt navigated it and injected a title reading "move your tab into this Claude group", which made the group easy to find and got the tab closed, ending the run. An anchor nobody is invited to touch survives.
 
-Two additions are recoverable rather than fatal too: `.adopt` says how many turned up and waits for the extras to be moved back out. Ctrl-C cancels the adoption and leaves the shell running, implemented as a flag rather than an interruption so a read-only poll already in flight is allowed to settle instead of becoming an outcome nobody can classify.
+Two additions are recoverable rather than fatal too: `.adopt` says how many turned up and waits for the extras to be moved back out. Only drivable-looking tabs count as ambiguous, so a stray blank tab beside the real one is ignored rather than turned into a round-trip. Adoption waits for as long as the human needs, rather than inheriting `--timeout`, which is a per-call transport ceiling and no time at all to find a context menu. Ctrl-C cancels and leaves the shell running, and end of input cancels as well, since nobody is left at a closed pipe to move a tab.
+
+Cancellation is a flag rather than an interruption, so a read-only poll already in flight settles instead of becoming an outcome nobody can classify. Ctrl-C itself arrives two different ways, and reviewing this release caught the first implementation handling only one of them: on a terminal, readline intercepts the keypress and emits the signal event on the interface, and no process-level signal ever fires, so the process handler that every piped test exercised was unreachable from an actual keyboard. Both paths are handled now, and the keypress path is tested under a real pty, because a piped test structurally cannot see it.
+
+At exit, whether the anchor is safe to close is judged from the live group rather than from bookkeeping: a tab adopted and then moved back out no longer needs protecting, and one created by hand mid-session does. When nothing else remains the anchor is closed; when something does, it stays and the shell says why.
 
 There is no second confirmation, on purpose. Adoption touches no page, and the next line is written by a human who has just read which tab was adopted, so the confirmation is structural rather than a prompt. A scripted form that acts immediately would not inherit that.
 

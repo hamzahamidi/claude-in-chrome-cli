@@ -10,7 +10,7 @@
 const readline = require('readline');
 
 const { BridgeSession, BridgeError } = require('./bridge-session.js');
-const { adoptTab } = require('./tab-adoption.js');
+const { adoptTab, contextOf, tabsIn } = require('./tab-adoption.js');
 
 // Same numbers and names as the one-shot contract, because a caller that
 // already parses `cic call --json` should not need a second vocabulary.
@@ -226,7 +226,7 @@ function shownUrl(url) {
  * remembered, because nothing is remembered between lines in this shell and one
  * implicit current tab would be the end of that.
  */
-async function runAdopt(session, output, timeoutSeconds, anchors) {
+async function runAdopt(session, rl, output, anchors) {
   output.write('\nMove the Chrome tab you want Claude to use into the Claude tab group.\n');
   output.write('That gives Claude access to read and interact with that live page.\n');
   output.write('Right-click the tab, then Add tab to group.\n\n');
@@ -234,13 +234,31 @@ async function runAdopt(session, output, timeoutSeconds, anchors) {
   // Cancellation is a flag, not an interruption. A poll already in flight is
   // read-only and is allowed to settle, so cancelling never invents an outcome
   // nobody can classify.
+  //
+  // Ctrl-C arrives two different ways and both must work. On a terminal,
+  // readline intercepts the keypress and emits 'SIGINT' on the INTERFACE; no
+  // process signal ever fires, which a pty demonstrates and a piped test cannot.
+  // Without a terminal there is no keypress and a real SIGINT reaches the
+  // process. The first version registered only the process handler, so Ctrl-C
+  // cancelled in tests and did nothing for a human.
   let cancelled = false;
-  const onInterrupt = () => { cancelled = true; output.write('\ncancelling…\n'); };
+  const onInterrupt = () => { if (!cancelled) { cancelled = true; output.write('\ncancelling…\n'); } };
+  // End of input is its own cancellation: nobody is left to move a tab in.
+  const onEndOfInput = () => { cancelled = true; };
   process.on('SIGINT', onInterrupt);
+  rl.on('SIGINT', onInterrupt);
+  rl.on('close', onEndOfInput);
 
   try {
     const result = await adoptTab(session, {
-      timeoutSeconds,
+      // The window is the human's, not the transport's. A per-call --timeout of
+      // 30 seconds is no time at all to find a context menu, and the premise
+      // checks that shaped this feature allowed minutes. Adoption therefore
+      // waits until the user acts, cancels, or closes input.
+      timeoutSeconds: Infinity,
+      // Pacing only, read by tests so a poll loop does not make every suite run
+      // multiples of 1.5 seconds long. Behaviour is identical at any pace.
+      pollMs: Number(process.env.CIC_ADOPT_POLL_MS) || undefined,
       cancelled: () => cancelled,
       notify: (event) => {
         if (event.kind === 'waiting') { output.write('Waiting for a tab…  Ctrl-C to cancel\n'); }
@@ -259,7 +277,6 @@ async function runAdopt(session, output, timeoutSeconds, anchors) {
     if (result.anchorCreated && result.anchor !== null) { anchors.created = result.anchor; }
 
     if (result.outcome === 'adopted') {
-      anchors.adoptedTabs.push(result.tab.tabId);
       output.write(`\n✓ ${result.tab.title || '(untitled)'}\n`);
       output.write(`  ${shownUrl(result.tab.url)}\n`);
       output.write(`\nAdopted as tab ${result.tab.tabId}. Pass that id to the tools you call next.\n\n`);
@@ -271,6 +288,8 @@ async function runAdopt(session, output, timeoutSeconds, anchors) {
     output.write(`cic: ${failure.message}\n\n`);
   } finally {
     process.removeListener('SIGINT', onInterrupt);
+    rl.removeListener('SIGINT', onInterrupt);
+    rl.removeListener('close', onEndOfInput);
   }
 }
 
@@ -297,11 +316,11 @@ async function runShell({ timeoutSeconds, input, output }) {
   const rl = readline.createInterface({ input, output, prompt: 'cic> ' });
   output.write("Connected. One line is: <tool> [json-args]. .adopt to use a tab you already have open. Ctrl-D or .exit to leave.\n");
 
-  // What .adopt opened and what it adopted, so the exit path can decide whether
-  // an anchor is safe to close. Closing a group's first tab makes the bridge
-  // lose the whole group, so an anchor is never closed while an adopted tab is
-  // still managed.
-  const anchors = { created: null, adoptedTabs: [] };
+  // The anchor .adopt opened, if any. Whether it is safe to close at exit is
+  // decided by looking at the live group then, not by bookkeeping: a tab
+  // adopted and later moved back out would otherwise pin an anchor that no
+  // longer protects anything.
+  const anchors = { created: null };
   let exitCode = EXIT.OK;
   let queue = Promise.resolve();
   // Readline emits every piped line and then fires close at end of input, all
@@ -327,7 +346,7 @@ async function runShell({ timeoutSeconds, input, output }) {
       if (!line) { prompt(); return; }
       if (line === '.exit' || line === '.quit') { stopped = true; closed = true; rl.close(); return; }
       if (line === '.adopt') {
-        await runAdopt(session, output, timeoutSeconds, anchors);
+        await runAdopt(session, rl, output, anchors);
         prompt();
         return;
       }
@@ -390,17 +409,29 @@ async function runShell({ timeoutSeconds, input, output }) {
  * Closes an anchor this shell opened, but only when doing so is safe.
  *
  * Closing a group's first tab makes the bridge lose the whole group, and every
- * other tab in it becomes invisible and unclosable through the bridge. So an
- * anchor is closed only when nothing was adopted. When an adopted tab is still
- * in the group, the anchor is left open and the reason is said out loud: one
- * stray blank tab is cheaper than silently detaching the user's live tab, and
- * this is the one place the tool knowingly leaves something behind.
+ * other tab in it becomes invisible and unclosable through the bridge. Safety
+ * is judged from the live group at exit rather than from bookkeeping: a tab
+ * adopted and later moved back out no longer needs protecting, and a tab the
+ * user created by hand mid-session does. When another tab remains, the anchor
+ * stays open and the reason is said out loud: one stray blank tab is cheaper
+ * than silently detaching a live tab, and this is the one place the tool
+ * knowingly leaves something behind. A group that cannot be read is left
+ * alone, because closing what cannot be verified is the wrong default.
  */
 async function tidyAnchor(session, output, anchors) {
   if (anchors.created === null) { return; }
-  if (anchors.adoptedTabs.length > 0) {
+  let others = null;
+  try {
+    const reply = await session.call('tools/call', { name: 'tabs_context_mcp', arguments: {} });
+    others = tabsIn(contextOf(reply)).filter((tab) => tab.tabId !== anchors.created);
+  } catch { /* unreadable; fall through to the fail-closed message */ }
+  if (others === null) {
+    output.write(`cic: the blank tab ${anchors.created} may still be open.\n`);
+    return;
+  }
+  if (others.length > 0) {
     output.write(`cic: leaving the blank tab ${anchors.created} open on purpose. `
-      + 'Closing it would make the bridge lose the group, and your adopted tab with it. '
+      + 'Closing it would make the bridge lose the group, and the tabs still in it. '
       + 'Close it yourself once you are done with the group.\n');
     return;
   }

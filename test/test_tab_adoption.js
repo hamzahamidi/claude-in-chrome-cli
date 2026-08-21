@@ -99,7 +99,6 @@ async function main() {
   {
     const { result, kinds } = await run([
       [], [BLANK(901)], [BLANK(901), BLANK(902)], [BLANK(901), BLANK(902)],
-      [BLANK(901), BLANK(902), REAL(500)],
     ], { timeoutSeconds: 2 });
     check('a blank tab is never adopted', result.outcome, 'timeout');
     check('and the caller is told why it is being skipped', kinds.includes('internal-tab'), true);
@@ -121,6 +120,19 @@ async function main() {
       [[], [BLANK(901)], [BLANK(901), REAL(500)], [BLANK(901), REAL(500)]],
       { undrivable: [], timeoutSeconds: 4 });
     check('a drivable tab is adopted', result.tab.tabId, 500);
+  }
+
+  // A stray blank tab beside the real one is noise, not ambiguity: it can never
+  // be adopted, so it must not force the user to remove it first. The count in
+  // too-many is therefore of drivable-looking candidates only.
+  {
+    const { result, kinds } = await run([
+      [], [BLANK(901)],
+      [BLANK(901), BLANK(902), REAL(500)], [BLANK(901), BLANK(902), REAL(500)],
+    ]);
+    check('a blank tab beside the real one does not block adoption', result.outcome, 'adopted');
+    check('and the real one is what gets adopted', result.tab.tabId, 500);
+    check('with no too-many round-trip demanded', kinds.includes('too-many'), false);
   }
 
   // ---- more than one addition is recoverable, not fatal -------------------

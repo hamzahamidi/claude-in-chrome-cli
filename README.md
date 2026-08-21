@@ -133,9 +133,9 @@ Adopted as tab 500. Pass that id to the tools you call next.
 
 The bridge has no tool that moves a tab, so you move it, and that move is the consent. `.adopt` only makes it safe to detect: it holds a group open, waits, and identifies your tab as one new live id confirmed on two consecutive polls, then checks the bridge can actually drive it. Titles and URLs are shown to you and never used to decide which tab was meant, and the URL is shown as origin and path only.
 
-It prints the id rather than remembering it, because this shell has no implicit current tab and one adopted tab is not worth being the exception. Move two tabs in and it says so and waits for you to take the extras out; Ctrl-C cancels the adoption and leaves the shell running.
+It prints the id rather than remembering it, because this shell has no implicit current tab and one adopted tab is not worth being the exception. It waits for as long as you need: Ctrl-C cancels and leaves the shell running, and closing input cancels too, since nobody is left to move a tab. Move two tabs in and it says so and waits for you to take the extras out; a stray blank tab beside the real one is ignored rather than treated as ambiguity, because a blank tab can never be adopted.
 
-**A blank tab may be left behind on purpose.** If the group did not exist, `.adopt` opens one tab to hold it open, and that tab owns the group: closing it makes the bridge lose the whole group and your adopted tab with it. So when you leave, that tab stays and the shell says why. Close it yourself once you are done.
+**A blank tab may be left behind on purpose.** If the group did not exist, `.adopt` opens one tab to hold it open, and that tab owns the group: closing it makes the bridge lose the whole group and every tab still in it. So if the group still holds other tabs when you leave, that blank tab stays and the shell says why; if the group holds nothing else, it is closed for you. Close a kept one yourself once you are done.
 
 ![A cic shell session making four calls over one connection: the tabId printed by the first reply is threaded into the three that follow. Each reply's tab context is elided.](docs/cic-demo-session.webp)
 

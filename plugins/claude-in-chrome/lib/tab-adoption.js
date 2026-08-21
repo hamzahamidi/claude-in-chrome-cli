@@ -128,12 +128,11 @@ async function adoptTab(session, {
     polls++;
     const now = contextOf(await call('tabs_context_mcp', {}));
     const ids = new Set(tabsIn(now).map((tab) => tab.tabId));
-    const added = [...ids].filter((id) => !baseline.has(id));
 
     // The group emptied out: whatever held it open is gone and nothing has been
     // moved in. Replace the anchor rather than abort, since a closed id can
     // never come back as an addition and the baseline stays sound.
-    if (ids.size === 0 && added.length === 0) {
+    if (ids.size === 0) {
       if (anchor !== null) { baseline.delete(anchor); }
       const fresh = contextOf(await call('tabs_context_mcp', { createIfEmpty: true }));
       if (tabsIn(fresh).length === 0) {
@@ -147,31 +146,41 @@ async function adoptTab(session, {
       continue;
     }
 
-    if (added.length === 0) { previous = null; continue; }
+    const addedTabs = tabsIn(now).filter((tab) => !baseline.has(tab.tabId));
+    // Only a drivable-looking tab can be ambiguous. A blank chrome:// tab can
+    // never be adopted, so it contributes no ambiguity and must not force the
+    // user through a "move the extras out" round-trip alongside a real one.
+    const candidates = addedTabs.filter((tab) => !looksInternal(tab));
+    const internals = addedTabs.filter((tab) => looksInternal(tab));
 
-    if (added.length > 1) {
+    if (candidates.length === 0) {
+      previous = null;
+      announcedExtras = 0;
+      if (internals.length > 0) {
+        const signature = internals.map((tab) => tab.tabId).sort().join(',');
+        if (announcedInternal !== signature) {
+          announcedInternal = signature;
+          notify({ kind: 'internal-tab', tab: internals[0] });
+        }
+      } else {
+        announcedInternal = null;
+      }
+      continue;
+    }
+
+    if (candidates.length > 1) {
       // Recoverable by design: say what is ambiguous and keep waiting, rather
       // than making a human start over because they moved two tabs.
-      if (announcedExtras !== added.length) {
-        announcedExtras = added.length;
-        notify({ kind: 'too-many', count: added.length });
+      if (announcedExtras !== candidates.length) {
+        announcedExtras = candidates.length;
+        notify({ kind: 'too-many', count: candidates.length });
       }
       previous = null;
       continue;
     }
     announcedExtras = 0;
 
-    const candidate = tabsIn(now).find((tab) => tab.tabId === added[0]);
-    if (!candidate) { previous = null; continue; }
-
-    if (looksInternal(candidate)) {
-      if (announcedInternal !== candidate.tabId) {
-        announcedInternal = candidate.tabId;
-        notify({ kind: 'internal-tab', tab: candidate });
-      }
-      previous = candidate.tabId;
-      continue;
-    }
+    const candidate = candidates[0];
 
     // Stability first: a single reading of a set difference can catch the
     // browser mid-move.
@@ -197,4 +206,4 @@ async function adoptTab(session, {
   return { outcome: 'timeout', anchor, anchorCreated, polls };
 }
 
-module.exports = { adoptTab, AdoptionError, contextOf, looksInternal, DEFAULT_POLL_MS };
+module.exports = { adoptTab, AdoptionError, contextOf, tabsIn, looksInternal, DEFAULT_POLL_MS };
