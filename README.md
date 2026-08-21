@@ -9,7 +9,7 @@
 
 Use the **Claude in Chrome** extension tools natively in Claude Code, or call them from your shell with `cic`. Both connect through the same MCP server.
 
-![Listing the tools the Claude in Chrome extension exposes](docs/cic-demo.png)
+![cic tabs listing open tabs read from Chrome's session files on disk: 29 tabs across 3 profiles, where the extension's bridge can see 4](docs/cic-tabs-demo.png)
 
 ## Why
 
