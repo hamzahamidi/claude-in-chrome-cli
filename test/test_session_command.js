@@ -311,6 +311,310 @@ if (process.platform === 'win32') {
   }
 }
 
+// ---- .adopt in the shell --------------------------------------------------
+
+// The protocol itself is tested in test_tab_adoption.js. What matters here is
+// what a human at a terminal experiences, so stdin is held OPEN while adoption
+// runs: the first version of these tests piped a fixed script, and under the
+// indefinite window that now exists, end of input cancels adoption before the
+// first poll. A piped test literally cannot see an adoption any more, which is
+// the point: nobody is at a pipe to move a tab.
+//
+// Each scenario runs in a -e child that stages writes against the shell's
+// output, then reports what it saw as one JSON line. The suite stays
+// synchronous, the same pattern as the fatal-exit probe above.
+const BLANK = { tabId: 901, title: 'New tab', url: 'chrome://newtab/' };
+const PAGE = {
+  tabId: 500,
+  title: 'GitHub — PR #24',
+  url: 'https://github.com/hamzahamidi/claude-in-chrome-cli/pull/24?tab=secret#frag',
+};
+
+/**
+ * Drives `cic shell` with stdin held open. `steps` run in order: each waits for
+ * `when` in the accumulated output, then writes, ends stdin, or signals. The
+ * verdict is the shell's full output plus how it exited.
+ */
+function shellSession(script, steps, extraEnv = {}) {
+  const probe = `
+    const { spawn } = require('child_process');
+    const steps = JSON.parse(process.env.PROBE_STEPS);
+    const child = spawn(process.argv[1], [process.argv[2], 'shell', '--timeout', '10'],
+      { stdio: ['pipe', 'pipe', 'pipe'] });
+    let out = '';
+    let err = '';
+    child.stdout.on('data', (c) => { out += c; });
+    child.stderr.on('data', (c) => { err += c; });
+    let at = 0;
+    const runner = setInterval(() => {
+      const step = steps[at];
+      if (!step) { clearInterval(runner); return; }
+      if (!new RegExp(step.when).test(out)) { return; }
+      at++;
+      if (step.write !== undefined) { child.stdin.write(step.write); }
+      if (step.end) { child.stdin.end(); }
+      if (step.signal) { child.kill(step.signal); }
+    }, 25);
+    const giveUp = setTimeout(() => {
+      clearInterval(runner);
+      console.log(JSON.stringify({ out, err, code: null, signal: 'timeout', step: at }));
+      child.kill('SIGKILL');
+      process.exit(0);
+    }, 15000);
+    child.on('exit', (code, signal) => {
+      clearInterval(runner);
+      clearTimeout(giveUp);
+      console.log(JSON.stringify({ out, err, code, signal, step: at }));
+    });
+  `;
+  const ran = spawnSync(process.execPath, ['-e', probe, process.execPath, CIC], {
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      CIC_CLAUDE_BIN: process.execPath,
+      CIC_CLAUDE_ARGS: STUB,
+      CIC_STUB_MODE: 'adopt',
+      CIC_STUB_ADOPT: JSON.stringify(script),
+      CIC_ADOPT_POLL_MS: '25',
+      PROBE_STEPS: JSON.stringify(steps),
+      ...extraEnv,
+    },
+  });
+  try { return JSON.parse(ran.stdout.trim().split('\n').pop()); } catch { return { out: ran.stdout, code: -1 }; }
+}
+
+{
+  // The happy path, exactly as a human drives it: .adopt, wait, tab appears,
+  // keep working, leave.
+  const seen = shellSession(
+    [[], [BLANK], [BLANK, PAGE], [BLANK, PAGE]],
+    [
+      { when: 'Connected', write: '.adopt\n' },
+      { when: 'Adopted as tab 500', write: '.exit\n' },
+    ]);
+  check('.adopt explains what moving a tab grants before waiting',
+    /read and interact with that live page/.test(seen.out), true);
+  check('and says how to do it', /Add tab to group/.test(seen.out), true);
+  check('and says it is waiting, with how to cancel',
+    /Waiting for a tab….*Ctrl-C to cancel/s.test(seen.out), true);
+  check('the adopted tab leads with its title, not its id',
+    /✓ GitHub — PR #24/.test(seen.out), true);
+  check('the url is shown as origin and path only',
+    /github\.com\/hamzahamidi\/claude-in-chrome-cli\/pull\/24\n/.test(seen.out), true);
+  check('so a query string never reaches the prompt', /secret/.test(seen.out), false);
+  check('nor a fragment', /frag/.test(seen.out), false);
+  check('the id is given, because the next line needs it',
+    /Adopted as tab 500/.test(seen.out), true);
+  // The exit rule: the adopted tab is still in the group, so the anchor that
+  // owns the group stays, and the reason is stated.
+  check('an anchor is left open while another tab is in the group',
+    /leaving the blank tab 901 open on purpose/.test(seen.out), true);
+  check('and the reason is stated, not just the fact',
+    /make the bridge lose the group/.test(seen.out), true);
+  check('the shell still exits 0', seen.code, 0);
+}
+
+{
+  // End of input during adoption cancels it: nobody is left to move a tab.
+  // This is also why every one of these tests must hold stdin open.
+  const seen = shellSession(
+    [[], [BLANK]],
+    [
+      { when: 'Connected', write: '.adopt\n' },
+      { when: 'Waiting for a tab', end: true },
+    ]);
+  check('closing stdin during adoption cancels it',
+    /Cancelled\. No page was touched/.test(seen.out), true);
+  check('and the anchor is closed, having nothing to protect',
+    /leaving the blank tab/.test(seen.out), false);
+  check('and the shell exits 0', seen.code, 0);
+}
+
+{
+  // A tab adopted and then moved back out no longer needs protecting, so the
+  // exit decision has to come from the live group, not from bookkeeping.
+  const seen = shellSession(
+    [[], [BLANK], [BLANK, PAGE], [BLANK, PAGE], [BLANK]],
+    [
+      { when: 'Connected', write: '.adopt\n' },
+      { when: 'Adopted as tab 500', write: '.exit\n' },
+    ]);
+  check('an anchor alone at exit is closed even after an adoption',
+    /leaving the blank tab/.test(seen.out), false);
+  check('with a clean exit', seen.code, 0);
+}
+
+{
+  // An existing group is used as it stands: nothing created, nothing tidied.
+  const seen = shellSession(
+    [[PAGE], [PAGE], [PAGE, { tabId: 777, title: 'Docs', url: 'https://example.com/x' }],
+      [PAGE, { tabId: 777, title: 'Docs', url: 'https://example.com/x' }]],
+    [
+      { when: 'Connected', write: '.adopt\n' },
+      { when: 'Adopted as tab 777', write: '.exit\n' },
+    ]);
+  check('an existing group is adopted into without creating an anchor',
+    /Adopted as tab 777/.test(seen.out), true);
+  check('and nothing is left behind, because nothing was opened',
+    /leaving the blank tab/.test(seen.out), false);
+}
+
+{
+  // A stray blank tab must not force a "move the extras out" round-trip: it can
+  // never be adopted, so it contributes no ambiguity alongside the real one.
+  const seen = shellSession(
+    [[], [BLANK], [BLANK, { tabId: 902, title: 'New tab', url: 'chrome://newtab/' }, PAGE],
+      [BLANK, { tabId: 902, title: 'New tab', url: 'chrome://newtab/' }, PAGE]],
+    [
+      { when: 'Connected', write: '.adopt\n' },
+      { when: 'Adopted as tab 500', write: '.exit\n' },
+    ]);
+  check('a stray blank tab does not block adopting the real one',
+    /Adopted as tab 500/.test(seen.out), true);
+  check('and is not reported as an extra to remove', /tabs were added/.test(seen.out), false);
+}
+
+{
+  // Two real tabs are genuinely ambiguous: say so, wait, resolve when one goes.
+  const seen = shellSession(
+    [[], [BLANK],
+      [BLANK, PAGE, { tabId: 600, title: 'Other', url: 'https://example.com/o' }],
+      [BLANK, PAGE, { tabId: 600, title: 'Other', url: 'https://example.com/o' }],
+      [BLANK, { tabId: 600, title: 'Other', url: 'https://example.com/o' }],
+      [BLANK, { tabId: 600, title: 'Other', url: 'https://example.com/o' }]],
+    [
+      { when: 'Connected', write: '.adopt\n' },
+      { when: 'Adopted as tab 600', write: '.exit\n' },
+    ]);
+  check('two real tabs are reported with the count', /2 tabs were added/.test(seen.out), true);
+  check('and say what to do', /Move the ones you do not want back out/.test(seen.out), true);
+  check('and adoption completes once one remains', /Adopted as tab 600/.test(seen.out), true);
+}
+
+{
+  // A tab that cannot be driven yet is announced and retried, not adopted.
+  const seen = shellSession(
+    [[], [BLANK], [BLANK, PAGE], [BLANK, PAGE]],
+    [
+      { when: 'Connected', write: '.adopt\n' },
+      { when: 'cannot be driven yet', end: true },
+    ],
+    { CIC_STUB_ADOPT_UNDRIVABLE: '[500]' });
+  check('a tab that cannot be driven says so, and why it might be temporary',
+    /cannot be driven yet, possibly still loading/.test(seen.out), true);
+  check('and adoption does not complete on it', /Adopted as tab 500/.test(seen.out), false);
+}
+
+{
+  // A group that empties mid-wait is held open again, visibly.
+  const seen = shellSession(
+    [[], [BLANK], [], [BLANK, PAGE], [BLANK, PAGE]],
+    [
+      { when: 'Connected', write: '.adopt\n' },
+      { when: 'Adopted as tab 500', write: '.exit\n' },
+    ]);
+  check('a group that empties says it is being held open again',
+    /held open again/.test(seen.out), true);
+  check('and adoption still completes', /Adopted as tab 500/.test(seen.out), true);
+}
+
+{
+  // A bridge that will not produce a group at all: reported, and the shell
+  // survives rather than dying.
+  const failed = run(['shell', '--timeout', '2'], ['.adopt', 'navigate {}', '.exit'],
+    { mode: 'is-error' });
+  check('a bridge that will not open a group is reported', /cic: /.test(failed.stdout), true);
+  check('and the shell carries on afterwards', failed.status, 0);
+}
+
+// Ctrl-C has two arrival paths and each needs its own proof. Without a
+// terminal, a real POSIX signal reaches the process; that is what kill()
+// delivers and what this first probe exercises. On a terminal, readline
+// intercepts the keypress and emits SIGINT on the interface, and no process
+// signal ever fires, so only a pty can exercise it: the first version of this
+// feature registered only the process handler, every piped test passed, and
+// Ctrl-C did nothing for an actual human.
+if (process.platform === 'win32') {
+  skip('Ctrl-C cancels the adoption without killing the shell',
+    'needs POSIX signal delivery to a child');
+} else {
+  const seen = shellSession(
+    [[], [BLANK]],
+    [
+      { when: 'Connected', write: '.adopt\n' },
+      { when: 'Waiting for a tab', signal: 'SIGINT' },
+      { when: 'Cancelled', write: '.exit\n' },
+    ]);
+  check('a process-level SIGINT is acknowledged', /cancelling/.test(seen.out), true);
+  check('the adoption reports itself cancelled', /Cancelled\. No page was touched/.test(seen.out), true);
+  check('and the shell was not killed by the signal', seen.signal, null);
+  check('exiting normally instead', seen.code, 0);
+}
+
+{
+  const havePython = spawnSync('python3', ['--version'], { encoding: 'utf8' }).status === 0;
+  if (process.platform === 'win32' || !havePython) {
+    skip('a Ctrl-C KEYPRESS on a real terminal cancels the adoption',
+      process.platform === 'win32' ? 'needs a pty' : 'needs python3 for the pty');
+  } else {
+    // The pty is the only honest way to test this path: under a terminal the
+    // keypress never becomes a process signal at all.
+    const pyDriver = `
+import json, os, pty, select, subprocess, sys, time
+master, slave = pty.openpty()
+proc = subprocess.Popen([sys.argv[1], sys.argv[2], 'shell', '--timeout', '10'],
+    stdin=slave, stdout=slave, stderr=slave, close_fds=True)
+os.close(slave)
+out = b''
+def wait_for(needle, seconds):
+    global out
+    end = time.time() + seconds
+    while time.time() < end:
+        r, _, _ = select.select([master], [], [], 0.1)
+        if r:
+            try: chunk = os.read(master, 65536)
+            except OSError: break
+            if not chunk: break
+            out += chunk
+        if needle in out: return True
+    return needle in out
+ok = wait_for(b'Connected', 8)
+os.write(master, b'.adopt\\n')
+ok = ok and wait_for(b'Waiting for a tab', 8)
+os.write(master, b'\\x03')
+cancelled = wait_for(b'Cancelled. No page was touched', 8)
+os.write(master, b'.exit\\n')
+end = time.time() + 5
+while proc.poll() is None and time.time() < end:
+    r, _, _ = select.select([master], [], [], 0.1)
+    if r:
+        try: out += os.read(master, 65536)
+        except OSError: break
+code = proc.poll()
+if code is None:
+    proc.kill()
+print(json.dumps({'setup': ok, 'cancelled': cancelled, 'alive_after': code is None or code == 0}))
+`;
+    const ran = spawnSync('python3', ['-c', pyDriver, process.execPath, CIC], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        CIC_CLAUDE_BIN: process.execPath,
+        CIC_CLAUDE_ARGS: STUB,
+        CIC_STUB_MODE: 'adopt',
+        CIC_STUB_ADOPT: JSON.stringify([[], [BLANK]]),
+        CIC_ADOPT_POLL_MS: '25',
+      },
+    });
+    let seen = {};
+    try { seen = JSON.parse(ran.stdout.trim().split('\n').pop()); } catch { seen = {}; }
+    check('the pty reached the waiting state', seen.setup, true);
+    check('a Ctrl-C KEYPRESS on a real terminal cancels the adoption', seen.cancelled, true);
+    check('and the shell survives it', seen.alive_after, true);
+  }
+}
+
+
 // ---- a command refuses flags it would otherwise ignore --------------------
 
 for (const [args, why] of [

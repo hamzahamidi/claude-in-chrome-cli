@@ -52,8 +52,13 @@ async function main() {
     const held = await withTab(s, { url: 'https://example.com' }, body(s));
     check('withTab reports the tab it made', held.tabId, 4242);
     check('and hands that id to the body', held.outcome.result.content[0].text, 'body ran against tab 4242');
+    // Two reads at the front and one before the close, all load-bearing: the
+    // first learns whether a group exists (tabs_create_mcp refuses without one),
+    // the second opens it, and the last is the cleanup guard looking before it
+    // closes a group's first tab.
     check('the whole lifecycle runs in order',
-      toolsCalledIn(capture).join(' '), 'tabs_create_mcp navigate get_page_text tabs_close_mcp');
+      toolsCalledIn(capture).join(' '),
+      'tabs_context_mcp tabs_context_mcp navigate get_page_text tabs_context_mcp tabs_close_mcp');
     check('and a clean run carries no cleanup warning', held.tabWarning, undefined);
     await s.close();
   }
@@ -74,7 +79,8 @@ async function main() {
     await withTab(s, {}, body(s));
     check('no url means no navigation', toolsCalledIn(capture).includes('navigate'), false);
     check('but the tab is still made and closed',
-      toolsCalledIn(capture).join(' '), 'tabs_create_mcp get_page_text tabs_close_mcp');
+      toolsCalledIn(capture).join(' '),
+      'tabs_context_mcp tabs_context_mcp get_page_text tabs_context_mcp tabs_close_mcp');
     await s.close();
   }
 
@@ -86,7 +92,7 @@ async function main() {
   // acted and the only one --retries repeats. For a failed navigate a tab
   // already existed, so that promise was false.
   {
-    const s = session('tabs-create-error');
+    const s = session('tabs-create-error', { env: { CIC_STUB_GROUP_EXISTS: '1' } });
     await s.open();
     let error = null;
     try { await withTab(s, {}, body(s)); } catch (failure) { error = failure; }
@@ -96,7 +102,7 @@ async function main() {
   }
 
   {
-    const s = session('tabs-create-rpc-error');
+    const s = session('tabs-create-rpc-error', { env: { CIC_STUB_GROUP_EXISTS: '1' } });
     await s.open();
     let error = null;
     try { await withTab(s, {}, body(s)); } catch (failure) { error = failure; }
@@ -172,7 +178,7 @@ async function main() {
   // to fail loudly rather than address every later call to nothing. Dispatched
   // on purpose: a tab really was created, so retrying makes a second orphan.
   {
-    const s = session('tabs-no-id');
+    const s = session('tabs-no-id', { env: { CIC_STUB_GROUP_EXISTS: '1' } });
     await s.open();
     let error = null;
     try { await withTab(s, {}, body(s)); } catch (failure) { error = failure; }
@@ -219,6 +225,100 @@ async function main() {
     check('and carries the cleanup warning rather than dropping it',
       error && /tab 4242 may still be open/.test(error.tabWarning || ''), true);
     check('and names the tab that may still be open', error && error.tabId, 4242);
+    await s.close();
+  }
+
+  // ---- a group that does not exist yet ------------------------------------
+  //
+  // The bridge refuses tabs_create_mcp until a group exists. Shipped 0.7.0
+  // called it first and so failed for anyone starting from an empty group, which
+  // is the ordinary case; every live check passed because a group happened to
+  // exist, and the stub answered create unconditionally. Both are fixed, and
+  // this is the assertion that would have caught it.
+  {
+    const capture = nextCapture();
+    const s = session('tabs-ok', { env: { CIC_STUB_CAPTURE: capture, CIC_STUB_GROUP_EXISTS: '0' } });
+    await s.open();
+    const held = await withTab(s, { url: 'https://example.com' }, body(s));
+    check('withTab works when no tab group exists yet', held.outcome.result.isError, undefined);
+    check('opening the group rather than demanding one already exists',
+      toolsCalledIn(capture)[0], 'tabs_context_mcp');
+    check('and it never calls tabs_create_mcp, which would have been refused',
+      toolsCalledIn(capture).includes('tabs_create_mcp'), false);
+    await s.close();
+  }
+
+  // A group that cannot be opened at all is a tool error, not a crash.
+  {
+    const s = session('tabs-no-group-ever');
+    await s.open();
+    let error = null;
+    try { await withTab(s, {}, body(s)); } catch (failure) { error = failure; }
+    check('a group that will not open is a TabLifecycleError',
+      error instanceof TabLifecycleError, true);
+    check('and says what it could not do',
+      error && /could not open a tab group/.test(error.message), true);
+    await s.close();
+  }
+
+  // ---- cleanup must not orphan the tabs it leaves behind ------------------
+  //
+  // Closing a group's first tab makes the bridge lose the group, and every other
+  // tab in it becomes invisible and unclosable from any session. Those groups
+  // are what accumulate as identical pills in the tab strip, so withTab's own
+  // cleanup refuses to make one and says so instead.
+  {
+    const capture = nextCapture();
+    const s = session('tabs-close-would-orphan', { env: { CIC_STUB_CAPTURE: capture } });
+    await s.open();
+    const held = await withTab(s, {}, body(s));
+    check('a cleanup that would orphan other tabs does not happen',
+      toolsCalledIn(capture).includes('tabs_close_mcp'), false);
+    check('and it is reported rather than done silently',
+      /first tab in its group/.test(held.tabWarning || ''), true);
+    check('naming how many tabs it would have taken with it',
+      /1 other tab\(s\)/.test(held.tabWarning || ''), true);
+    check('while the work itself still succeeded',
+      held.outcome.result.content[0].text, 'body ran against tab 4242');
+    await s.close();
+  }
+
+  // An unreadable group fails closed: our own tab is left open rather than
+  // closed blind. Leaking a blank tab of ours is much cheaper than detaching
+  // someone's live page.
+  {
+    const capture = nextCapture();
+    const s = session('tabs-context-unreadable', { env: { CIC_STUB_CAPTURE: capture } });
+    await s.open();
+    const held = await withTab(s, {}, body(s));
+    check('an unreadable group means the tab is not closed',
+      toolsCalledIn(capture).includes('tabs_close_mcp'), false);
+    check('and the reason says closing blind was the risk',
+      /could not be read first/.test(held.tabWarning || ''), true);
+    await s.close();
+  }
+
+  // Both halves of the guard can fail by throwing rather than answering, and a
+  // throw on the way out must not replace the outcome already being reported.
+  {
+    const s = session('tabs-guard-read-hangs', { timeoutSeconds: 1 });
+    await s.open();
+    const held = await withTab(s, {}, body(s));
+    check('a guard read that never answers leaves the tab open',
+      /could not be read first/.test(held.tabWarning || ''), true);
+    check('and the work still succeeded', held.outcome.result.content[0].text,
+      'body ran against tab 4242');
+    await s.close();
+  }
+
+  {
+    const s = session('tabs-close-hangs', { timeoutSeconds: 1 });
+    await s.open();
+    const held = await withTab(s, {}, body(s));
+    check('a close that never answers is a warning, not a thrown failure',
+      /may still be open/.test(held.tabWarning || ''), true);
+    check('and the work still succeeded', held.outcome.result.content[0].text,
+      'body ran against tab 4242');
     await s.close();
   }
 

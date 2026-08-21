@@ -492,8 +492,12 @@ check('with-tab succeeds', run(['with-tab', 'https://example.com', 'get_page_tex
 check('with-tab --keep-tab still succeeds',
   run(['with-tab', 'https://example.com', 'get_page_text', '--keep-tab'], { mode: 'tabs-ok' }).status, 0);
 
+// tabs_create_mcp is only reached when a group already exists; with none,
+// withTab opens one with createIfEmpty and never calls create. That is the
+// 0.7.0 bug these had been masking, so they now say which state they are in.
 check('a tab the browser will not create is a tool error',
-  run(['with-tab', 'https://example.com', 'get_page_text'], { mode: 'tabs-create-error' }).status, 1);
+  run(['with-tab', 'https://example.com', 'get_page_text'],
+    { mode: 'tabs-create-error', env: { CIC_STUB_GROUP_EXISTS: '1' } }).status, 1);
 check('a navigation the browser refuses is a tool error',
   run(['with-tab', 'https://example.com', 'get_page_text'], { mode: 'tabs-navigate-error' }).status, 1);
 
@@ -503,7 +507,8 @@ check('a navigation the browser refuses is a tool error',
 // the class that promises the browser cannot have acted, and the only one
 // --retries repeats. A tab had already been created, so that promise was false.
 {
-  const created = run(['with-tab', 'https://example.com', 'get_page_text'], { mode: 'tabs-create-rpc-error' });
+  const created = run(['with-tab', 'https://example.com', 'get_page_text'],
+    { mode: 'tabs-create-rpc-error', env: { CIC_STUB_GROUP_EXISTS: '1' } });
   check('a create answering with a JSON-RPC error is a tool error', created.status, 1);
   check('and reports the bridge message, not a TypeError',
     /create blew up/.test(created.stderr), true);
@@ -538,11 +543,12 @@ check('a navigation the browser refuses is a tool error',
 // which one, so a tab exists that nobody can address. Exit 3 would promise the
 // browser never acted, and it is the class --retries repeats, which here would
 // leave a fresh orphan tab behind on every attempt.
-const nameless = run(['with-tab', 'https://example.com', 'get_page_text'], { mode: 'tabs-no-id' });
+const nameless = run(['with-tab', 'https://example.com', 'get_page_text'],
+  { mode: 'tabs-no-id', env: { CIC_STUB_GROUP_EXISTS: '1' } });
 check('a create reply carrying no tab id is an unknown outcome', nameless.status, 2);
 check('and is not retried into a second orphan tab',
   run(['with-tab', 'https://example.com', 'get_page_text', '--retries', '3'],
-    { mode: 'tabs-no-id' }).status, 2);
+    { mode: 'tabs-no-id', env: { CIC_STUB_GROUP_EXISTS: '1' } }).status, 2);
 
 // The fail-closed case, end to end: exit 2, and the id of the tab that was
 // deliberately left behind, because someone has to go and look at it.
@@ -555,6 +561,15 @@ check('--json carries that same explanation in the envelope',
   /Tab 4242 was left open on purpose/.test(run(['with-tab', 'https://example.com', 'computer', '--json'], {
     mode: 'tabs-body-unknown', timeoutSeconds: 1,
   }).stdout), true);
+
+// The 0.7.0 bug, from the command line: with no group, with-tab must still work.
+{
+  const fromEmpty = run(['with-tab', 'https://example.com', 'get_page_text'],
+    { mode: 'tabs-ok', env: { CIC_STUB_GROUP_EXISTS: '0' } });
+  check('with-tab succeeds when no tab group exists yet', fromEmpty.status, 0);
+  check('and does not report a refused create',
+    /could not create a tab/.test(fromEmpty.stderr), false);
+}
 
 check('with-tab wants a url', run(['with-tab']).status, 64);
 check('with-tab wants a tool name too', run(['with-tab', 'https://example.com']).status, 64);
