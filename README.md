@@ -152,6 +152,8 @@ cic with-tab https://example.com computer '{"action":"screenshot"}' --output sho
 
 It fills in `tabId` and nothing else, so passing your own is a usage error rather than a silently ignored argument. `--keep-tab` leaves the tab for inspection.
 
+It will not close its own tab if that would take other tabs with it. Closing a group's first tab makes the bridge lose the whole group, and everything else in it becomes unreachable, so in that case the tab is left open and said so rather than closed quietly.
+
 **After an unknown outcome the tab is deliberately left open**, and its id is printed. The request reached the browser and no usable reply came back, so closing the tab could discard a half-finished action and destroy the only evidence of it. An ordinary tool error is different: the browser answered, so the tab is closed as usual. A cleanup that fails is always reported and never swallowed, whether the work succeeded or not: after a success it is a warning beside the result, and after a failure it is appended to that failure, since a tab that may still be open is exactly what you need to know while reading why the work failed.
 
 The helper behind it lives in `lib/tab-lifecycle.js` rather than on `BridgeSession`. That class is the generic protocol layer and knows nothing about what any tool is called; this is the file where `tabs_create_mcp`, `navigate` and `tabs_close_mcp` are allowed to be named.

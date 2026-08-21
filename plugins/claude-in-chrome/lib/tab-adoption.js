@@ -20,6 +20,8 @@
 //   and never used to decide which tab was meant.
 'use strict';
 
+const { contextOf, tabsIn } = require('./tab-lifecycle.js');
+
 const DEFAULT_POLL_MS = 1500;
 
 /** Adoption could not be completed. Never raised for a user cancelling. */
@@ -30,30 +32,6 @@ class AdoptionError extends Error {
     this.kind = kind;
   }
 }
-
-const textOf = (result) => (result && result.content ? result.content : [])
-  .filter((part) => part && part.type === 'text')
-  .map((part) => part.text)
-  .join('\n');
-
-/**
- * The availableTabs payload out of a tabs_context_mcp reply.
- *
- * An empty group answers in prose rather than JSON, which is a state and not a
- * failure, so it reads as no tabs rather than as an unparseable reply.
- */
-function contextOf(reply) {
-  if (!reply || reply.error) { return null; }
-  const text = textOf(reply.result);
-  const match = /\{"availableTabs".*?\}\s*\]\s*,\s*"tabGroupId"\s*:\s*-?\d+\s*\}/s.exec(text);
-  if (match) {
-    try { return JSON.parse(match[0]); } catch { /* fall through to the prose case */ }
-  }
-  if (/no mcp tab group/i.test(text)) { return { availableTabs: [], tabGroupId: null }; }
-  return null;
-}
-
-const tabsIn = (context) => (context && Array.isArray(context.availableTabs) ? context.availableTabs : []);
 
 /**
  * Whether a candidate is worth offering to the capability check at all.

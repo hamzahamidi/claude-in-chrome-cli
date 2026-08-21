@@ -28,6 +28,25 @@ const textOf = (result) => (result && result.content ? result.content : [])
   .join('\n');
 
 /**
+ * The availableTabs payload out of a tabs_context_mcp reply.
+ *
+ * An empty group answers in prose rather than JSON, which is a state and not a
+ * failure, so it reads as no tabs rather than as an unparseable reply.
+ */
+function contextOf(reply) {
+  if (!reply || reply.error) { return null; }
+  const text = textOf(reply.result);
+  const match = /\{"availableTabs".*?\}\s*\]\s*,\s*"tabGroupId"\s*:\s*-?\d+\s*\}/s.exec(text);
+  if (match) {
+    try { return JSON.parse(match[0]); } catch { /* fall through to the prose case */ }
+  }
+  if (/no mcp tab group/i.test(text)) { return { availableTabs: [], tabGroupId: null }; }
+  return null;
+}
+
+const tabsIn = (context) => (context && Array.isArray(context.availableTabs) ? context.availableTabs : []);
+
+/**
  * The message a failed call carries, whichever of the two ways it failed.
  *
  * A reply is a JSON-RPC error or a result, never both, and a result can still
@@ -70,6 +89,33 @@ function tabIdFrom(result) {
  * reported and must not replace it.
  */
 async function closeTab(session, tabId, timeoutSeconds) {
+  // Closing a group's FIRST tab makes the bridge lose the entire group, and
+  // every other tab in it becomes invisible and unclosable from any session.
+  // Those unreachable groups are what pile up as identical pills in the tab
+  // strip, so this refuses rather than making one. A tab of ours left open is
+  // the cheaper mistake by a wide margin.
+  // contextOf returns null for a reply it cannot read and an empty tab list for a
+  // group that really is empty. Collapsing those with tabsIn() made the
+  // unreadable case look like an empty group and fail OPEN, which is the wrong
+  // direction for a guard whose whole purpose is refusing to orphan tabs.
+  let context;
+  try {
+    context = contextOf(await session.call('tools/call',
+      { name: 'tabs_context_mcp', arguments: {} }, { timeoutSeconds }));
+  } catch (failure) {
+    return `tab ${tabId} was left open: the group could not be read first, and closing blind `
+      + `risks orphaning tabs in it (${failure.message})`;
+  }
+  if (context === null) {
+    return `tab ${tabId} was left open: the group could not be read first, and closing blind `
+      + 'risks orphaning tabs in it';
+  }
+  const tabs = tabsIn(context);
+  if (tabs.length > 1 && tabs[0].tabId === tabId) {
+    return `tab ${tabId} was left open: it is the first tab in its group, and closing it would `
+      + `make the bridge lose the group along with the ${tabs.length - 1} other tab(s) in it`;
+  }
+
   try {
     const reply = await session.call('tools/call',
       { name: 'tabs_close_mcp', arguments: { tabId } }, { timeoutSeconds });
@@ -98,11 +144,37 @@ async function closeTab(session, tabId, timeoutSeconds) {
  * open is exactly what someone needs to know while reading why the work failed.
  */
 async function withTab(session, { url, keepTab = false, timeoutSeconds } = {}, body) {
-  const created = await session.call('tools/call',
-    { name: 'tabs_create_mcp', arguments: {} }, { timeoutSeconds });
-  const createRefusal = refusalIn(created);
-  if (createRefusal) { throw new TabLifecycleError(`could not create a tab: ${createRefusal}`); }
-  const tabId = tabIdFrom(created.result);
+  // tabs_create_mcp requires a group to exist already: with none, it refuses and
+  // points at tabs_context_mcp. Shipped 0.7.0 called it straight away and so
+  // failed for anyone whose group was empty, which is the ordinary case. Every
+  // live check passed anyway because a group happened to exist from earlier work,
+  // and the stub answered create unconditionally, so nothing caught it.
+  //
+  // The group is therefore established first. When it did not exist,
+  // createIfEmpty hands back the tab it just made and that tab is ours to drive.
+  // When it did exist, a fresh tab is created instead, because a tab this did not
+  // make must never be navigated.
+  const existing = tabsIn(contextOf(await session.call('tools/call',
+    { name: 'tabs_context_mcp', arguments: {} }, { timeoutSeconds })));
+
+  let tabId;
+  if (existing.length === 0) {
+    const opened = await session.call('tools/call',
+      { name: 'tabs_context_mcp', arguments: { createIfEmpty: true } }, { timeoutSeconds });
+    const openRefusal = refusalIn(opened);
+    if (openRefusal) { throw new TabLifecycleError(`could not open a tab group: ${openRefusal}`); }
+    const tabs = tabsIn(contextOf(opened));
+    if (tabs.length === 0) {
+      throw new TabLifecycleError('could not open a tab group to work in');
+    }
+    tabId = tabs[0].tabId;
+  } else {
+    const created = await session.call('tools/call',
+      { name: 'tabs_create_mcp', arguments: {} }, { timeoutSeconds });
+    const createRefusal = refusalIn(created);
+    if (createRefusal) { throw new TabLifecycleError(`could not create a tab: ${createRefusal}`); }
+    tabId = tabIdFrom(created.result);
+  }
 
   try {
     if (url !== undefined) {
@@ -136,4 +208,4 @@ async function withTab(session, { url, keepTab = false, timeoutSeconds } = {}, b
   }
 }
 
-module.exports = { withTab, closeTab, tabIdFrom, refusalIn, TabLifecycleError };
+module.exports = { withTab, closeTab, tabIdFrom, refusalIn, contextOf, tabsIn, TabLifecycleError };

@@ -13,6 +13,9 @@ const capture = process.env.CIC_STUB_CAPTURE;
 
 const send = (object) => process.stdout.write(JSON.stringify(object) + '\n');
 const captured = [];
+// The bridge refuses tabs_create_mcp until a group exists, so the stub does too.
+let stubGroupExists = process.env.CIC_STUB_GROUP_EXISTS === '1';
+let stubContextReads = 0;
 // Adoption scripts advance per tabs_context_mcp call, so the counter lives here.
 let adoptPolls = 0;
 let adoptCreated = 0;
@@ -179,6 +182,7 @@ function replyTo(message) {
   // behaviour the fail-closed rule is about.
   if (mode.startsWith('tabs-')) {
     const name = (message.params || {}).name;
+    const args = (message.params || {}).arguments || {};
     const ok = (text) => send({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text }] } });
     const refuse = (text) => send({
       jsonrpc: '2.0', id, result: { content: [{ type: 'text', text }], isError: true },
@@ -192,6 +196,10 @@ function replyTo(message) {
     });
 
     if (name === 'tabs_create_mcp') {
+      if (!stubGroupExists) {
+        refuse('No MCP tab group exists. Use tabs_context_mcp with createIfEmpty: true first to create one.');
+        return;
+      }
       if (mode === 'tabs-no-id') { ok('Created new tab.'); return; }
       if (mode === 'tabs-create-error') { refuse('no tab available'); return; }
       if (mode === 'tabs-create-rpc-error') { rpcError('create blew up'); return; }
@@ -207,7 +215,41 @@ function replyTo(message) {
       ok('Navigated to the url');
       return;
     }
+    if (name === 'tabs_context_mcp') {
+      // The cleanup guard reads the group before closing anything, and withTab
+      // reads it before deciding whether it may create a tab, so this answers
+      // both. createIfEmpty is what brings a group into existence.
+      stubContextReads++;
+      // Unreadable only from the third read onward: the first two establish the
+      // group, so the failure lands on the cleanup guard's look, which is the
+      // case worth testing. Failing the first read would just stop withTab
+      // before it started.
+      if (mode === 'tabs-guard-read-hangs' && stubContextReads > 2) { return; }
+      if (mode === 'tabs-context-unreadable' && stubContextReads > 2) {
+        send({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: 'who knows' }] } });
+        return;
+      }
+      if (args.createIfEmpty) { stubGroupExists = true; }
+      if (!stubGroupExists) {
+        ok('No MCP tab groups found. Use createIfEmpty: true to create one.');
+        return;
+      }
+      if (mode === 'tabs-no-group-ever') {
+        ok('No MCP tab groups found. Use createIfEmpty: true to create one.');
+        return;
+      }
+      const group = mode === 'tabs-close-would-orphan'
+        ? [{ tabId: 4242, title: 'ours', url: 'https://example.com/a' },
+          { tabId: 5555, title: 'theirs', url: 'https://example.com/b' }]
+        : [{ tabId: 4242, title: 'ours', url: 'https://example.com/a' }];
+      send({
+        jsonrpc: '2.0', id,
+        result: { content: [{ type: 'text', text: JSON.stringify({ availableTabs: group, tabGroupId: 77 }) }] },
+      });
+      return;
+    }
     if (name === 'tabs_close_mcp') {
+      if (mode === 'tabs-close-hangs') { return; }
       if (mode === 'tabs-close-error' || mode === 'tabs-navigate-and-close-error') {
         refuse('that tab is gone already');
         return;

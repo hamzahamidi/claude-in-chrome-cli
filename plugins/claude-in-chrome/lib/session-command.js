@@ -10,7 +10,8 @@
 const readline = require('readline');
 
 const { BridgeSession, BridgeError } = require('./bridge-session.js');
-const { adoptTab, contextOf, tabsIn } = require('./tab-adoption.js');
+const { adoptTab } = require('./tab-adoption.js');
+const { contextOf, tabsIn } = require('./tab-lifecycle.js');
 
 // Same numbers and names as the one-shot contract, because a caller that
 // already parses `cic call --json` should not need a second vocabulary.
