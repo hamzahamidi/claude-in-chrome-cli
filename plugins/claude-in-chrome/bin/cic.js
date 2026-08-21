@@ -40,7 +40,7 @@ Usage:
   cic list                          list available tools
   cic call <tool> [json-args]       call a tool, arguments default to {}
   cic session --jsonl               many calls over one connection, one JSON object per line
-  cic shell                         the same connection, driven by hand
+  cic shell                         the same connection, driven by hand (.adopt uses a tab you already have open)
   cic with-tab <url> <tool> [args]  make a tab, navigate, call one tool, close it
   cic tabs                          every open tab, read from disk without the bridge
 
