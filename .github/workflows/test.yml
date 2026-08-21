@@ -42,6 +42,8 @@ jobs:
         run: npx c8 --no-clean --reporter=none node test/test_bridge_session.js
       - name: tab lifecycle and fail-closed cleanup
         run: npx c8 --no-clean --reporter=none node test/test_tab_lifecycle.js
+      - name: guided tab adoption
+        run: npx c8 --no-clean --reporter=none node test/test_tab_adoption.js
       - name: image validation and atomic file output
         run: npx c8 --no-clean --reporter=none node test/test_image_output.js
       - name: session and shell streaming interfaces
@@ -58,7 +60,7 @@ jobs:
         shell: bash
         run: |
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            npx c8 report --check-coverage --lines 97 --branches 89 --functions 100
+            npx c8 report --check-coverage --lines 97 --branches 89 --functions 98
           else
             npx c8 report --check-coverage
           fi

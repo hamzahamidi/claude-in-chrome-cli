@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.8.0 (unreleased)
+
+Adds `.adopt` to `cic shell`: use a Chrome tab you already have open, rather than a fresh one the bridge made.
+
+The bridge only ever sees tabs inside its own group and has no tool to move one in, so the user does it themselves through Chrome's tab context menu. What `.adopt` adds is making that safe to detect. It holds a group open, watches what appears, and refuses to guess: identity is the live tab id and nothing else, confirmed on two consecutive polls, because a single reading of a set difference can catch the browser mid-move.
+
+Three of its rules come from measuring a live bridge before any of it was written, and each replaced an assumption in the plan.
+
+**A blank tab satisfies the detector.** During the first check a `chrome://newtab` appeared in the group, held one stable new id, and was duly reported as an adoption. The detector was right and the conclusion was not, because a `chrome://` page cannot be driven at all. So a candidate now has to answer a read-only call before it counts, and scheme filtering only improves the message. Detection is not adoption.
+
+**The anchor owns the group.** The plan said to close the temporary tab after a successful adoption. Closing a group's first tab makes the bridge lose the entire group, and every other tab in it becomes invisible and unclosable through the bridge, including the one just adopted. So the temporary tab is an anchor rather than a placeholder: it is never closed while an adopted tab is still managed, and at exit the shell says out loud that it is leaving one behind. That is the first time this tool knowingly leaves state in the browser, and one stray blank tab is cheaper than silently detaching someone's live page.
+
+**An anchor that vanishes is recoverable.** The plan treated it as fatal. It is not: the baseline is a set of ids and a closed id cannot come back as an addition, so the difference stays correct and the group is simply held open again.
+
+The anchor is also deliberately plain. A first attempt navigated it and injected a title reading "move your tab into this Claude group", which made the group easy to find and got the tab closed, ending the run. An anchor nobody is invited to touch survives.
+
+Two additions are recoverable rather than fatal too: `.adopt` says how many turned up and waits for the extras to be moved back out. Ctrl-C cancels the adoption and leaves the shell running, implemented as a flag rather than an interruption so a read-only poll already in flight is allowed to settle instead of becoming an outcome nobody can classify.
+
+There is no second confirmation, on purpose. Adoption touches no page, and the next line is written by a human who has just read which tab was adopted, so the confirmation is structural rather than a prompt. A scripted form that acts immediately would not inherit that.
+
+The adopted id is printed and nothing is remembered. `cic shell` has no variables and no implicit current tab, and one adopted tab is not worth being the exception.
+
 ## 0.7.0 (2026-08-20)
 
 Adds three things a script could not do before: keep a tab for exactly one job and clean it up, get an image out to a file, and ask what is open without a bridge.

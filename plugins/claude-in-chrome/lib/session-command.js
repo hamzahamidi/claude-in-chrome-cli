@@ -10,6 +10,7 @@
 const readline = require('readline');
 
 const { BridgeSession, BridgeError } = require('./bridge-session.js');
+const { adoptTab } = require('./tab-adoption.js');
 
 // Same numbers and names as the one-shot contract, because a caller that
 // already parses `cic call --json` should not need a second vocabulary.
@@ -191,11 +192,84 @@ async function runSession({ timeoutSeconds, input, output, jsonl }) {
   return exitCode;
 }
 
+/** origin and path only, so a prompt never echoes a query string or a token. */
+function shownUrl(url) {
+  try {
+    const parsed = new URL(url);
+    return `${parsed.host}${parsed.pathname === '/' ? '' : parsed.pathname}`;
+  } catch {
+    return '(unparseable url)';
+  }
+}
+
+/**
+ * `.adopt`: use a tab the user already has open.
+ *
+ * Only the rendering and the cancelling live here; the protocol is in
+ * lib/tab-adoption.js. Two deliberate absences. There is no second
+ * confirmation, because adoption touches no page and the next line is written by
+ * a human who has just read which tab was adopted, so the confirmation is
+ * structural rather than a prompt. And the adopted id is printed rather than
+ * remembered, because nothing is remembered between lines in this shell and one
+ * implicit current tab would be the end of that.
+ */
+async function runAdopt(session, output, timeoutSeconds, anchors) {
+  output.write('\nMove the Chrome tab you want Claude to use into the Claude tab group.\n');
+  output.write('That gives Claude access to read and interact with that live page.\n');
+  output.write('Right-click the tab, then Add tab to group.\n\n');
+
+  // Cancellation is a flag, not an interruption. A poll already in flight is
+  // read-only and is allowed to settle, so cancelling never invents an outcome
+  // nobody can classify.
+  let cancelled = false;
+  const onInterrupt = () => { cancelled = true; output.write('\ncancelling…\n'); };
+  process.on('SIGINT', onInterrupt);
+
+  try {
+    const result = await adoptTab(session, {
+      timeoutSeconds,
+      cancelled: () => cancelled,
+      notify: (event) => {
+        if (event.kind === 'waiting') { output.write('Waiting for a tab…  Ctrl-C to cancel\n'); }
+        else if (event.kind === 'too-many') {
+          output.write(`${event.count} tabs were added. Move the ones you do not want back out of the group.\n`);
+        } else if (event.kind === 'internal-tab') {
+          output.write('That is a blank tab rather than a page. Still waiting.\n');
+        } else if (event.kind === 'not-drivable') {
+          output.write('That tab cannot be driven yet, possibly still loading. Still waiting.\n');
+        } else if (event.kind === 'anchor-replaced') {
+          output.write('The group had emptied, so it is being held open again.\n');
+        }
+      },
+    });
+
+    if (result.anchorCreated && result.anchor !== null) { anchors.created = result.anchor; }
+
+    if (result.outcome === 'adopted') {
+      anchors.adoptedTabs.push(result.tab.tabId);
+      output.write(`\n✓ ${result.tab.title || '(untitled)'}\n`);
+      output.write(`  ${shownUrl(result.tab.url)}\n`);
+      output.write(`\nAdopted as tab ${result.tab.tabId}. Pass that id to the tools you call next.\n\n`);
+      return;
+    }
+    if (result.outcome === 'cancelled') { output.write('Cancelled. No page was touched.\n\n'); return; }
+    output.write('No tab was moved in, so nothing was adopted. No page was touched.\n\n');
+  } catch (failure) {
+    output.write(`cic: ${failure.message}\n\n`);
+  } finally {
+    process.removeListener('SIGINT', onInterrupt);
+  }
+}
+
 /**
  * The human REPL over the same machinery. Deliberately dumb: a line is a tool
  * name and optional JSON arguments, nothing is remembered between lines, and
  * there is no interpolation. Anything cleverer belongs in the program calling
  * the JSONL interface.
+ *
+ * `.adopt` is the one exception, and it is session setup rather than a language
+ * feature: it prints an id and remembers nothing, so the line grammar stays as
+ * dumb as it was.
  */
 async function runShell({ timeoutSeconds, input, output }) {
   const session = new BridgeSession({ timeoutSeconds });
@@ -208,8 +282,13 @@ async function runShell({ timeoutSeconds, input, output }) {
   }
 
   const rl = readline.createInterface({ input, output, prompt: 'cic> ' });
-  output.write("Connected. One line is: <tool> [json-args]. Ctrl-D or .exit to leave.\n");
+  output.write("Connected. One line is: <tool> [json-args]. .adopt to use a tab you already have open. Ctrl-D or .exit to leave.\n");
 
+  // What .adopt opened and what it adopted, so the exit path can decide whether
+  // an anchor is safe to close. Closing a group's first tab makes the bridge
+  // lose the whole group, so an anchor is never closed while an adopted tab is
+  // still managed.
+  const anchors = { created: null, adoptedTabs: [] };
   let exitCode = EXIT.OK;
   let queue = Promise.resolve();
   // Readline emits every piped line and then fires close at end of input, all
@@ -234,6 +313,11 @@ async function runShell({ timeoutSeconds, input, output }) {
       const line = raw.trim();
       if (!line) { prompt(); return; }
       if (line === '.exit' || line === '.quit') { stopped = true; closed = true; rl.close(); return; }
+      if (line === '.adopt') {
+        await runAdopt(session, output, timeoutSeconds, anchors);
+        prompt();
+        return;
+      }
 
       const space = line.indexOf(' ');
       const tool = space === -1 ? line : line.slice(0, space);
@@ -284,8 +368,38 @@ async function runShell({ timeoutSeconds, input, output }) {
   });
 
   await new Promise((resolve) => { rl.on('close', () => queue.then(resolve, resolve)); });
+  await tidyAnchor(session, output, anchors);
   await session.close();
   return exitCode;
+}
+
+/**
+ * Closes an anchor this shell opened, but only when doing so is safe.
+ *
+ * Closing a group's first tab makes the bridge lose the whole group, and every
+ * other tab in it becomes invisible and unclosable through the bridge. So an
+ * anchor is closed only when nothing was adopted. When an adopted tab is still
+ * in the group, the anchor is left open and the reason is said out loud: one
+ * stray blank tab is cheaper than silently detaching the user's live tab, and
+ * this is the one place the tool knowingly leaves something behind.
+ */
+async function tidyAnchor(session, output, anchors) {
+  if (anchors.created === null) { return; }
+  if (anchors.adoptedTabs.length > 0) {
+    output.write(`cic: leaving the blank tab ${anchors.created} open on purpose. `
+      + 'Closing it would make the bridge lose the group, and your adopted tab with it. '
+      + 'Close it yourself once you are done with the group.\n');
+    return;
+  }
+  try {
+    const reply = await session.call('tools/call',
+      { name: 'tabs_close_mcp', arguments: { tabId: anchors.created } });
+    if (reply.error || (reply.result && reply.result.isError)) {
+      output.write(`cic: the blank tab ${anchors.created} may still be open.\n`);
+    }
+  } catch {
+    output.write(`cic: the blank tab ${anchors.created} may still be open.\n`);
+  }
 }
 
 module.exports = { runSession, runShell, planRecord, EXIT, KIND };

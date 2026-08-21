@@ -288,6 +288,170 @@ if (process.platform === 'win32') {
   }
 }
 
+// ---- .adopt in the shell --------------------------------------------------
+
+// The protocol itself is tested in test_tab_adoption.js. What matters here is
+// what a human sees, and the exit rule, which is the one place this tool
+// knowingly leaves something behind.
+const BLANK = { tabId: 901, title: 'New tab', url: 'chrome://newtab/' };
+const PAGE = {
+  tabId: 500,
+  title: 'GitHub — PR #24',
+  url: 'https://github.com/hamzahamidi/claude-in-chrome-cli/pull/24?tab=secret#frag',
+};
+const adoptScript = (steps) => ({
+  mode: 'adopt',
+  env: { CIC_STUB_ADOPT: JSON.stringify(steps) },
+});
+
+{
+  const adopted = run(['shell', '--timeout', '10'], ['.adopt', '.exit'],
+    adoptScript([[], [BLANK], [BLANK, PAGE], [BLANK, PAGE]]));
+  check('.adopt explains what moving a tab grants before waiting',
+    /read and interact with that live page/.test(adopted.stdout), true);
+  check('and says how to do it', /Add tab to group/.test(adopted.stdout), true);
+  check('and says it is waiting, with how to cancel',
+    /Waiting for a tab….*Ctrl-C to cancel/.test(adopted.stdout), true);
+  check('the adopted tab leads with its title, not its id',
+    /✓ GitHub — PR #24/.test(adopted.stdout), true);
+  check('the url is shown as origin and path only',
+    /github\.com\/hamzahamidi\/claude-in-chrome-cli\/pull\/24\n/.test(adopted.stdout), true);
+  check('so a query string never reaches the prompt', /secret/.test(adopted.stdout), false);
+  check('nor a fragment', /frag/.test(adopted.stdout), false);
+  check('the id is given, because the next line needs it',
+    /Adopted as tab 500/.test(adopted.stdout), true);
+  // The exit rule: the anchor is the group's first tab, so closing it would
+  // take the adopted tab with it.
+  check('an anchor is left open when a tab was adopted',
+    /leaving the blank tab 901 open on purpose/.test(adopted.stdout), true);
+  check('and the reason is stated, not just the fact',
+    /make the bridge lose the group/.test(adopted.stdout), true);
+  check('the shell still exits 0', adopted.status, 0);
+}
+
+{
+  // Nothing adopted, so there is nothing to orphan and the anchor goes.
+  const nothing = run(['shell', '--timeout', '1'], ['.adopt', '.exit'],
+    adoptScript([[], [BLANK]]));
+  check('a window with nothing moved in adopts nothing',
+    /nothing was adopted/.test(nothing.stdout), true);
+  check('and says no page was touched', /No page was touched/.test(nothing.stdout), true);
+  check('and the anchor is not left behind, having nothing to protect',
+    /leaving the blank tab/.test(nothing.stdout), false);
+  check('exiting 0 either way', nothing.status, 0);
+}
+
+{
+  // A group that already had a tab: nothing was created, so nothing is tidied.
+  const existing = run(['shell', '--timeout', '10'], ['.adopt', '.exit'],
+    adoptScript([[PAGE], [PAGE], [PAGE, { ...BLANK, tabId: 777, url: 'https://example.com/x' }],
+      [PAGE, { ...BLANK, tabId: 777, url: 'https://example.com/x' }]]));
+  check('an existing group is adopted into without creating an anchor',
+    /Adopted as tab 777/.test(existing.stdout), true);
+  check('and nothing is left behind, because nothing was opened',
+    /leaving the blank tab/.test(existing.stdout), false);
+}
+
+{
+  // Every recoverable state has to say something useful, or a human is left
+  // watching a silent prompt wondering whether it noticed.
+  const noisy = run(['shell', '--timeout', '3'], ['.adopt', '.exit'],
+    adoptScript([[], [BLANK], [BLANK, PAGE, { tabId: 600, title: 'Other', url: 'https://example.com/o' }],
+      [BLANK, PAGE, { tabId: 600, title: 'Other', url: 'https://example.com/o' }]]));
+  check('two tabs moved in is reported with the count',
+    /2 tabs were added/.test(noisy.stdout), true);
+  check('and says what to do about it',
+    /Move the ones you do not want back out/.test(noisy.stdout), true);
+
+  const blankOnly = run(['shell', '--timeout', '2'], ['.adopt', '.exit'],
+    adoptScript([[], [BLANK], [BLANK, { tabId: 902, title: 'New tab', url: 'chrome://newtab/' }],
+      [BLANK, { tabId: 902, title: 'New tab', url: 'chrome://newtab/' }]]));
+  check('a blank tab is called out rather than silently ignored',
+    /blank tab rather than a page/.test(blankOnly.stdout), true);
+
+  const undrivable = run(['shell', '--timeout', '2'], ['.adopt', '.exit'], {
+    mode: 'adopt',
+    env: {
+      CIC_STUB_ADOPT: JSON.stringify([[], [BLANK], [BLANK, PAGE], [BLANK, PAGE]]),
+      CIC_STUB_ADOPT_UNDRIVABLE: '[500]',
+    },
+  });
+  check('a tab that cannot be driven says so, and why it might be temporary',
+    /cannot be driven yet, possibly still loading/.test(undrivable.stdout), true);
+
+  const emptied = run(['shell', '--timeout', '3'], ['.adopt', '.exit'],
+    adoptScript([[], [BLANK], [], [BLANK, PAGE], [BLANK, PAGE]]));
+  check('a group that empties says it is being held open again',
+    /held open again/.test(emptied.stdout), true);
+
+  // A bridge that will not produce a group at all: reported on the prompt, and
+  // the shell survives it rather than dying.
+  const noGroup = run(['shell', '--timeout', '2'], ['.adopt', 'navigate {}', '.exit'],
+    { mode: 'is-error' });
+  check('a bridge that will not open a group is reported', /cic: /.test(noGroup.stdout), true);
+  check('and the shell carries on afterwards', noGroup.status, 0);
+}
+
+// Ctrl-C must cancel the adoption and leave the shell running, which is the
+// whole reason cancellation is a flag rather than an interruption: a poll
+// already in flight is read-only and is allowed to settle, so cancelling never
+// invents an outcome nobody can classify. Sending a signal to a child needs
+// POSIX semantics, so Windows says so rather than pretending.
+if (process.platform === 'win32') {
+  skip('Ctrl-C cancels the adoption without killing the shell',
+    'needs POSIX signal delivery to a child');
+} else {
+  const probe = `
+    const { spawn } = require('child_process');
+    const child = spawn(process.argv[1], [process.argv[2], 'shell', '--timeout', '20'], {
+      stdio: ['pipe', 'pipe', 'ignore'],
+      env: { ...process.env, CIC_STUB_MODE: 'adopt',
+        CIC_STUB_ADOPT: JSON.stringify([[], [{ tabId: 901, title: 'New tab', url: 'chrome://newtab/' }]]) },
+    });
+    let out = '';
+    child.stdout.on('data', (c) => { out += c; });
+    child.stdin.write('.adopt\\n');
+    // Once it is visibly waiting, interrupt it.
+    const interrupt = setInterval(() => {
+      if (/Waiting for a tab/.test(out)) {
+        clearInterval(interrupt);
+        child.kill('SIGINT');
+        setTimeout(() => child.stdin.end(), 400);
+      }
+    }, 50);
+    const giveUp = setTimeout(() => {
+      clearInterval(interrupt);
+      console.log(JSON.stringify({ code: null, signal: 'timeout', out }));
+      child.kill('SIGKILL');
+      process.exit(0);
+    }, 12000);
+    child.on('exit', (code, signal) => {
+      clearInterval(interrupt);
+      clearTimeout(giveUp);
+      console.log(JSON.stringify({ code, signal, out }));
+    });
+  `;
+  const ran = spawnSync(process.execPath, ['-e', probe, process.execPath, CIC], {
+    encoding: 'utf8',
+    env: { ...process.env, CIC_CLAUDE_BIN: process.execPath, CIC_CLAUDE_ARGS: STUB },
+  });
+  let seen = {};
+  try { seen = JSON.parse(ran.stdout.trim().split('\n').pop()); } catch { seen = {}; }
+  check('Ctrl-C is acknowledged', /cancelling/.test(seen.out || ''), true);
+  check('the adoption reports itself cancelled', /Cancelled\. No page was touched/.test(seen.out || ''), true);
+  check('and the shell was not killed by the signal', seen.signal, null);
+  check('exiting normally instead', seen.code, 0);
+  if (seen.code !== 0) { console.log(`        exit ${seen.code} signal ${seen.signal}`); }
+}
+
+{
+  // A shell that never adopts must be unchanged by the feature existing.
+  const plain = run(['shell', '--timeout', '2'], ['navigate {"url":"https://example.com"}', '.exit']);
+  check('the shell without .adopt still answers a tool line',
+    /stub replied/.test(plain.stdout), true);
+  check('and mentions .adopt in its banner', /\.adopt/.test(plain.stdout), true);
+}
+
 // ---- a command refuses flags it would otherwise ignore --------------------
 
 for (const [args, why] of [

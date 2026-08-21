@@ -13,6 +13,9 @@ const capture = process.env.CIC_STUB_CAPTURE;
 
 const send = (object) => process.stdout.write(JSON.stringify(object) + '\n');
 const captured = [];
+// Adoption scripts advance per tabs_context_mcp call, so the counter lives here.
+let adoptPolls = 0;
+let adoptCreated = 0;
 
 const initializeResult = (id) => ({
   jsonrpc: '2.0',
@@ -107,6 +110,65 @@ function replyTo(message) {
       jsonrpc: '2.0', id,
       result: { content: [{ type: 'text', text: 'the tool refused' }], isError: true },
     });
+    return;
+  }
+
+  // Adoption is the first thing here that depends on the group CHANGING over
+  // successive polls, which no static per-mode reply can express. CIC_STUB_ADOPT
+  // is a JSON array of poll answers, each an array of tab objects, and the last
+  // entry repeats once the script runs out. CIC_STUB_ADOPT_UNDRIVABLE lists tab
+  // ids whose javascript_tool call fails, so the capability check can be tested
+  // apart from the scheme filter.
+  if (mode === 'adopt') {
+    const script = JSON.parse(process.env.CIC_STUB_ADOPT || '[[]]');
+    const undrivable = new Set(JSON.parse(process.env.CIC_STUB_ADOPT_UNDRIVABLE || '[]'));
+    const name = (message.params || {}).name;
+    const args = (message.params || {}).arguments || {};
+
+    if (name === 'javascript_tool') {
+      if (undrivable.has(args.tabId)) {
+        send({
+          jsonrpc: '2.0', id,
+          result: { content: [{ type: 'text', text: 'Cannot access a chrome:// URL' }], isError: true },
+        });
+        return;
+      }
+      send({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: '12' }] } });
+      return;
+    }
+
+    if (name === 'tabs_context_mcp') {
+      const step = Math.min(adoptPolls, script.length - 1);
+      adoptPolls++;
+      let tabs = script[step] || [];
+      // createIfEmpty is what a caller reaches for when the group is empty, so
+      // it must actually produce one rather than answering the same emptiness.
+      if (tabs.length === 0 && args.createIfEmpty && !process.env.CIC_STUB_ADOPT_NO_CREATE) {
+        adoptCreated++;
+        tabs = [{ tabId: 900 + adoptCreated, title: 'New tab', url: 'chrome://newtab/' }];
+        script[step] = tabs;
+      }
+      if (tabs.length === 0) {
+        send({
+          jsonrpc: '2.0', id,
+          result: { content: [{ type: 'text', text: 'No MCP tab groups found. Use createIfEmpty: true to create one.' }] },
+        });
+        return;
+      }
+      send({
+        jsonrpc: '2.0', id,
+        result: {
+          content: [{ type: 'text', text: JSON.stringify({ availableTabs: tabs, tabGroupId: 4242 }) }],
+        },
+      });
+      return;
+    }
+
+    if (name === 'tabs_close_mcp') {
+      send({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: `Closed tab ${args.tabId}.` }] } });
+      return;
+    }
+    send({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: 'stub replied' }] } });
     return;
   }
 

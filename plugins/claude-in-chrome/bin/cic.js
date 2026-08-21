@@ -15,7 +15,7 @@ const { runSession, runShell } = require('../lib/session-command.js');
 const { writeImageResult, ImageOutputError } = require('../lib/image-output.js');
 const { withTab, TabLifecycleError } = require('../lib/tab-lifecycle.js');
 
-const VERSION = '0.7.0';
+const VERSION = '0.8.0';
 const DEFAULT_TIMEOUT_SECONDS = 30;
 // Backoff between retries. Only exit-3 failures are retried, and those fail
 // fast, so this stays short enough to be worth doing inside one command.
