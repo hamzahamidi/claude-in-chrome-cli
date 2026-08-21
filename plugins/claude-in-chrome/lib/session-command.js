@@ -75,7 +75,20 @@ function failureRecord(id, exitCode, message) {
 function writeLine(output, text) {
   return new Promise((resolve) => {
     let settled = false;
-    const done = () => { if (!settled) { settled = true; resolve(); } };
+    // Both listeners come off on the way out. `once` only detaches a listener
+    // when its event actually fires, so the error listener from every successful
+    // write stayed attached: fifteen records was enough for Node to warn about a
+    // probable leak, in precisely the long-running mode this function exists
+    // for. Same shape as the per-request listeners 0.5.0 removed from
+    // BridgeSession, missed here because that suite watches the child's stdout
+    // and this one is the session's own output stream.
+    const done = () => {
+      if (settled) { return; }
+      settled = true;
+      output.removeListener('error', done);
+      output.removeListener('drain', done);
+      resolve();
+    };
     // A consumer that goes away is not our failure; stop waiting for it.
     output.once('error', done);
     if (output.write(text)) { done(); return; }
