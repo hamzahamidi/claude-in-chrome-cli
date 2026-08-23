@@ -436,15 +436,14 @@ async function tidyAnchor(session, output, anchors) {
       + 'Close it yourself once you are done with the group.\n');
     return;
   }
-  try {
-    const reply = await session.call('tools/call',
-      { name: 'tabs_close_mcp', arguments: { tabId: anchors.created } });
-    if (reply.error || (reply.result && reply.result.isError)) {
-      output.write(`cic: the blank tab ${anchors.created} may still be open.\n`);
-    }
-  } catch {
-    output.write(`cic: the blank tab ${anchors.created} may still be open.\n`);
-  }
+  // Nothing else is in the group, so closing this tab would empty it, and an
+  // emptied group leaves a pill in the tab strip that nothing can reach again:
+  // Chromium records no group-lifecycle event, so a group lives only while a tab
+  // implies it. Keeping this one tab is what lets the next run reuse the group
+  // instead of opening another, which is the difference between one pill forever
+  // and one more pill every time.
+  output.write(`cic: leaving the blank tab ${anchors.created} open, which keeps the Claude group `
+    + 'reusable next time. Closing it would strand the group in the tab strip.\n');
 }
 
 module.exports = { runSession, runShell, planRecord, EXIT, KIND };

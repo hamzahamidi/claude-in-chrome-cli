@@ -425,8 +425,11 @@ function shellSession(script, steps, extraEnv = {}) {
     ]);
   check('closing stdin during adoption cancels it',
     /Cancelled\. No page was touched/.test(seen.out), true);
-  check('and the anchor is closed, having nothing to protect',
-    /leaving the blank tab/.test(seen.out), false);
+  // The anchor is kept even with nothing to protect. Emptying the group strands
+  // its pill in the tab strip where nothing can reach it again, and keeping one
+  // tab is what lets the next run reuse the group instead of opening another.
+  check('and the anchor is kept, so the group stays reusable',
+    /keeps the Claude group reusable/.test(seen.out), true);
   check('and the shell exits 0', seen.code, 0);
 }
 
@@ -439,8 +442,8 @@ function shellSession(script, steps, extraEnv = {}) {
       { when: 'Connected', write: '.adopt\n' },
       { when: 'Adopted as tab 500', write: '.exit\n' },
     ]);
-  check('an anchor alone at exit is closed even after an adoption',
-    /leaving the blank tab/.test(seen.out), false);
+  check('an anchor alone at exit is kept, rather than emptying the group',
+    /keeps the Claude group reusable/.test(seen.out), true);
   check('with a clean exit', seen.code, 0);
 }
 
