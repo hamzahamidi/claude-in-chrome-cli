@@ -23,8 +23,16 @@ function check(label, actual, expected) {
   console.log(`${ok ? 'ok  ' : 'FAIL'}  ${label}${ok ? '' : `\n        expected ${JSON.stringify(expected)}\n        actual   ${JSON.stringify(actual)}`}`);
 }
 
+// Every stub knob is cleared before each case. Assigning without clearing let
+// one test's CIC_STUB_GROUP_EXISTS leak into every later case in the file, which
+// silently changed which code path they exercised and made two correct
+// behaviours look broken.
+const STUB_KNOBS = ['CIC_STUB_CAPTURE', 'CIC_STUB_GROUP_EXISTS', 'CIC_STUB_ADOPT',
+  'CIC_STUB_ADOPT_UNDRIVABLE', 'CIC_STUB_ADOPT_NO_CREATE'];
+
 function session(mode, { timeoutSeconds = 2, env = {} } = {}) {
   process.env.CIC_STUB_MODE = mode;
+  for (const knob of STUB_KNOBS) { delete process.env[knob]; }
   Object.assign(process.env, env);
   return new BridgeSession({ binary: process.execPath, binaryArguments: [STUB], timeoutSeconds });
 }
@@ -52,13 +60,15 @@ async function main() {
     const held = await withTab(s, { url: 'https://example.com' }, body(s));
     check('withTab reports the tab it made', held.tabId, 4242);
     check('and hands that id to the body', held.outcome.result.content[0].text, 'body ran against tab 4242');
-    // Two reads at the front and one before the close, all load-bearing: the
-    // first learns whether a group exists (tabs_create_mcp refuses without one),
-    // the second opens it, and the last is the cleanup guard looking before it
-    // closes a group's first tab.
+    // Two reads at the front and one before cleanup, all load-bearing: the first
+    // learns whether a group exists (tabs_create_mcp refuses without one), the
+    // second opens it, and the last decides whether closing is safe. No close
+    // here on purpose: this call opened the group, so emptying it again would
+    // strand its pill in the tab strip, and the tab is kept to make the group
+    // reusable instead.
     check('the whole lifecycle runs in order',
       toolsCalledIn(capture).join(' '),
-      'tabs_context_mcp tabs_context_mcp navigate get_page_text tabs_context_mcp tabs_close_mcp');
+      'tabs_context_mcp tabs_context_mcp navigate get_page_text tabs_context_mcp');
     check('and a clean run carries no cleanup warning', held.tabWarning, undefined);
     await s.close();
   }
@@ -78,9 +88,9 @@ async function main() {
     await s.open();
     await withTab(s, {}, body(s));
     check('no url means no navigation', toolsCalledIn(capture).includes('navigate'), false);
-    check('but the tab is still made and closed',
+    check('but the tab is still made, and kept because this opened the group',
       toolsCalledIn(capture).join(' '),
-      'tabs_context_mcp tabs_context_mcp get_page_text tabs_context_mcp tabs_close_mcp');
+      'tabs_context_mcp tabs_context_mcp get_page_text tabs_context_mcp');
     await s.close();
   }
 
@@ -115,7 +125,7 @@ async function main() {
 
   {
     const capture = nextCapture();
-    const s = session('tabs-navigate-rpc-error', { env: { CIC_STUB_CAPTURE: capture } });
+    const s = session('tabs-navigate-rpc-error', { env: { CIC_STUB_CAPTURE: capture, CIC_STUB_GROUP_EXISTS: '1' } });
     await s.open();
     let error = null;
     try { await withTab(s, { url: 'https://blocked.example' }, body(s)); } catch (failure) { error = failure; }
@@ -130,7 +140,7 @@ async function main() {
 
   {
     const capture = nextCapture();
-    const s = session('tabs-navigate-error', { env: { CIC_STUB_CAPTURE: capture } });
+    const s = session('tabs-navigate-error', { env: { CIC_STUB_CAPTURE: capture, CIC_STUB_GROUP_EXISTS: '1' } });
     await s.open();
     let error = null;
     try { await withTab(s, { url: 'https://blocked.example' }, body(s)); } catch (failure) { error = failure; }
@@ -144,7 +154,7 @@ async function main() {
   // lifecycle, so it comes back as a result and the tab is tidied up.
   {
     const capture = nextCapture();
-    const s = session('tabs-body-error', { env: { CIC_STUB_CAPTURE: capture } });
+    const s = session('tabs-body-error', { env: { CIC_STUB_CAPTURE: capture, CIC_STUB_GROUP_EXISTS: '1' } });
     await s.open();
     const held = await withTab(s, {}, body(s));
     check('a body that reports isError is still an answer', held.outcome.result.isError, true);
@@ -194,7 +204,7 @@ async function main() {
   //
   // After success it is a warning beside the result.
   {
-    const s = session('tabs-close-error');
+    const s = session('tabs-close-error', { env: { CIC_STUB_GROUP_EXISTS: '1' } });
     await s.open();
     const held = await withTab(s, {}, body(s));
     check('a close that fails does not undo a successful body',
@@ -204,7 +214,7 @@ async function main() {
   }
 
   {
-    const s = session('tabs-close-rpc-error');
+    const s = session('tabs-close-rpc-error', { env: { CIC_STUB_GROUP_EXISTS: '1' } });
     await s.open();
     const held = await withTab(s, {}, body(s));
     check('a close answering with a JSON-RPC error is a warning too, not a crash',
@@ -216,7 +226,7 @@ async function main() {
   // work failed, while its tab is still sitting there, hides the one thing this
   // module exists to get right.
   {
-    const s = session('tabs-navigate-and-close-error');
+    const s = session('tabs-navigate-and-close-error', { env: { CIC_STUB_GROUP_EXISTS: '1' } });
     await s.open();
     let error = null;
     try { await withTab(s, { url: 'https://blocked.example' }, body(s)); } catch (failure) { error = failure; }
@@ -258,6 +268,37 @@ async function main() {
       error instanceof TabLifecycleError, true);
     check('and says what it could not do',
       error && /could not open a tab group/.test(error.message), true);
+    await s.close();
+  }
+
+  // ---- a group this opened is kept alive, not emptied ---------------------
+  //
+  // Emptying a group strands its pill: Chromium records no group-lifecycle
+  // event, so a group exists only while a tab implies it, and an emptied one
+  // survives in the tab strip where nothing can reach it. Measured by diffing
+  // the session file around a known create and close, which produced no group
+  // command whatsoever. Keeping one tab is what makes the next run reuse the
+  // group rather than open another.
+  {
+    const capture = nextCapture();
+    const s = session('tabs-ok', { env: { CIC_STUB_CAPTURE: capture, CIC_STUB_GROUP_EXISTS: '0' } });
+    await s.open();
+    const held = await withTab(s, {}, body(s));
+    check('a group this opened is left with its tab, not emptied',
+      toolsCalledIn(capture).includes('tabs_close_mcp'), false);
+    check('and that is not reported as a problem', held.tabWarning, undefined);
+    await s.close();
+  }
+
+  // A group that already existed is somebody else's to keep alive, so a tab
+  // created inside it is cleaned up normally.
+  {
+    const capture = nextCapture();
+    const s = session('tabs-ok', { env: { CIC_STUB_CAPTURE: capture, CIC_STUB_GROUP_EXISTS: '1' } });
+    await s.open();
+    await withTab(s, {}, body(s));
+    check('a tab created in a group that already existed is closed',
+      toolsCalledIn(capture).includes('tabs_close_mcp'), true);
     await s.close();
   }
 
@@ -312,7 +353,8 @@ async function main() {
   }
 
   {
-    const s = session('tabs-close-hangs', { timeoutSeconds: 1 });
+    const s = session('tabs-close-hangs',
+      { timeoutSeconds: 1, env: { CIC_STUB_GROUP_EXISTS: '1' } });
     await s.open();
     const held = await withTab(s, {}, body(s));
     check('a close that never answers is a warning, not a thrown failure',

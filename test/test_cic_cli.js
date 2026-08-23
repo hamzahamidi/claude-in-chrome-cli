@@ -519,7 +519,8 @@ check('a navigation the browser refuses is a tool error',
   check('a navigate answering with a JSON-RPC error is a tool error, never exit 3', moved.status, 1);
   check('and reports the bridge message', /navigate blew up/.test(moved.stderr), true);
 
-  const closed = run(['with-tab', 'https://example.com', 'get_page_text'], { mode: 'tabs-close-rpc-error' });
+  const closed = run(['with-tab', 'https://example.com', 'get_page_text'],
+    { mode: 'tabs-close-rpc-error', env: { CIC_STUB_GROUP_EXISTS: '1' } });
   check('a close answering with a JSON-RPC error still leaves the work successful', closed.status, 0);
   check('and warns that the tab may still be open',
     /tab 4242 may still be open: close blew up/.test(closed.stderr), true);
@@ -529,13 +530,14 @@ check('a navigation the browser refuses is a tool error',
 // work failed, while its tab is still sitting there, hides the thing with-tab
 // exists to get right.
 {
-  const both = run(['with-tab', 'https://example.com', 'get_page_text'], { mode: 'tabs-navigate-and-close-error' });
+  const both = run(['with-tab', 'https://example.com', 'get_page_text'],
+    { mode: 'tabs-navigate-and-close-error', env: { CIC_STUB_GROUP_EXISTS: '1' } });
   check('a failed navigation whose cleanup also failed is still a tool error', both.status, 1);
   check('and reports the navigation failure', /could not navigate/.test(both.stderr), true);
   check('and appends the cleanup warning rather than dropping it',
     /tab 4242 may still be open/.test(both.stderr), true);
   const asJson = run(['with-tab', 'https://example.com', 'get_page_text', '--json'],
-    { mode: 'tabs-navigate-and-close-error' });
+    { mode: 'tabs-navigate-and-close-error', env: { CIC_STUB_GROUP_EXISTS: '1' } });
   check('--json carries both in one envelope',
     /could not navigate/.test(asJson.stdout) && /may still be open/.test(asJson.stdout), true);
 }

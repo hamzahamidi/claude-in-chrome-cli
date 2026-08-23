@@ -88,7 +88,7 @@ function tabIdFrom(result) {
  * than throwing, because this runs while another outcome is already being
  * reported and must not replace it.
  */
-async function closeTab(session, tabId, timeoutSeconds) {
+async function closeTab(session, tabId, timeoutSeconds, { keepGroupAlive = false } = {}) {
   // Closing a group's FIRST tab makes the bridge lose the entire group, and
   // every other tab in it becomes invisible and unclosable from any session.
   // Those unreachable groups are what pile up as identical pills in the tab
@@ -114,6 +114,17 @@ async function closeTab(session, tabId, timeoutSeconds) {
   if (tabs.length > 1 && tabs[0].tabId === tabId) {
     return `tab ${tabId} was left open: it is the first tab in its group, and closing it would `
       + `make the bridge lose the group along with the ${tabs.length - 1} other tab(s) in it`;
+  }
+  // Emptying a group leaves its pill behind in the tab strip, and nothing can
+  // reach it afterwards: Chromium records no group-lifecycle event, so a group
+  // exists only while a tab implies it, and an emptied one becomes a runtime
+  // artifact invisible even on disk. Measured by diffing the session file around
+  // a known create and close: closing the last tab produced no group command at
+  // all. So a group this opened is kept alive with one tab instead, which the
+  // next run reuses rather than opening another. Steady state is one group and
+  // one spare tab, rather than one more pill per invocation.
+  if (keepGroupAlive && tabs.length === 1 && tabs[0].tabId === tabId) {
+    return null;
   }
 
   try {
@@ -158,7 +169,11 @@ async function withTab(session, { url, keepTab = false, timeoutSeconds } = {}, b
     { name: 'tabs_context_mcp', arguments: {} }, { timeoutSeconds })));
 
   let tabId;
+  // True when this call is what brought the group into being, which is the only
+  // case where emptying it again would strand a pill.
+  let openedGroup = false;
   if (existing.length === 0) {
+    openedGroup = true;
     const opened = await session.call('tools/call',
       { name: 'tabs_context_mcp', arguments: { createIfEmpty: true } }, { timeoutSeconds });
     const openRefusal = refusalIn(opened);
@@ -185,7 +200,7 @@ async function withTab(session, { url, keepTab = false, timeoutSeconds } = {}, b
     }
     const outcome = await body(tabId);
     if (!keepTab) {
-      const warning = await closeTab(session, tabId, timeoutSeconds);
+      const warning = await closeTab(session, tabId, timeoutSeconds, { keepGroupAlive: openedGroup });
       if (warning) { return { outcome, tabWarning: warning, tabId }; }
     }
     return { outcome, tabId };
@@ -198,7 +213,7 @@ async function withTab(session, { url, keepTab = false, timeoutSeconds } = {}, b
       throw failure;
     }
     if (!keepTab) {
-      const warning = await closeTab(session, tabId, timeoutSeconds);
+      const warning = await closeTab(session, tabId, timeoutSeconds, { keepGroupAlive: openedGroup });
       if (warning) {
         failure.tabWarning = warning;
         failure.tabId = tabId;
