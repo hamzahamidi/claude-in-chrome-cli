@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.8.0 (unreleased)
+## 0.8.0 (2026-08-23)
 
 Adds `.adopt` to `cic shell`: use a Chrome tab you already have open, rather than a fresh one the bridge made.
 
