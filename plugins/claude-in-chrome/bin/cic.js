@@ -15,7 +15,7 @@ const { runSession, runShell } = require('../lib/session-command.js');
 const { writeImageResult, ImageOutputError } = require('../lib/image-output.js');
 const { withTab, TabLifecycleError } = require('../lib/tab-lifecycle.js');
 
-const VERSION = '0.7.0';
+const VERSION = '0.8.0';
 const DEFAULT_TIMEOUT_SECONDS = 30;
 // Backoff between retries. Only exit-3 failures are retried, and those fail
 // fast, so this stays short enough to be worth doing inside one command.
@@ -40,7 +40,7 @@ Usage:
   cic list                          list available tools
   cic call <tool> [json-args]       call a tool, arguments default to {}
   cic session --jsonl               many calls over one connection, one JSON object per line
-  cic shell                         the same connection, driven by hand
+  cic shell                         the same connection, driven by hand (.adopt uses a tab you already have open)
   cic with-tab <url> <tool> [args]  make a tab, navigate, call one tool, close it
   cic tabs                          every open tab, read from disk without the bridge
 

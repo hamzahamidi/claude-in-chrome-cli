@@ -112,6 +112,31 @@ A malformed line is that line's problem: it gets a `usage` record and the sessio
 
 For driving it by hand, `cic shell` is the same connection with a prompt. One line is a tool name and optional JSON arguments, nothing is remembered between lines, and `.exit` or Ctrl-D leaves.
 
+### Using a tab you already have open
+
+Everything above drives a tab the bridge made. `.adopt`, in `cic shell`, uses one of yours instead:
+
+```text
+cic> .adopt
+
+Move the Chrome tab you want Claude to use into the Claude tab group.
+That gives Claude access to read and interact with that live page.
+Right-click the tab, then Add tab to group.
+
+Waiting for a tab…  Ctrl-C to cancel
+
+✓ GitHub — PR #24
+  github.com/hamzahamidi/claude-in-chrome-cli/pull/24
+
+Adopted as tab 500. Pass that id to the tools you call next.
+```
+
+The bridge has no tool that moves a tab, so you move it, and that move is the consent. `.adopt` only makes it safe to detect: it holds a group open, waits, and identifies your tab as one new live id confirmed on two consecutive polls, then checks the bridge can actually drive it. Titles and URLs are shown to you and never used to decide which tab was meant, and the URL is shown as origin and path only.
+
+It prints the id rather than remembering it, because this shell has no implicit current tab and one adopted tab is not worth being the exception. It waits for as long as you need: Ctrl-C cancels and leaves the shell running, and closing input cancels too, since nobody is left to move a tab. Move two tabs in and it says so and waits for you to take the extras out; a stray blank tab beside the real one is ignored rather than treated as ambiguity, because a blank tab can never be adopted.
+
+**A blank tab may be left behind on purpose.** If the group did not exist, `.adopt` opens one tab to hold it open, and that tab owns the group: closing it makes the bridge lose the whole group and every tab still in it. So if the group still holds other tabs when you leave, that blank tab stays and the shell says why; if the group holds nothing else, it is closed for you. Close a kept one yourself once you are done.
+
 ![A cic shell session making four calls over one connection: the tabId printed by the first reply is threaded into the three that follow. Each reply's tab context is elided.](docs/cic-demo-session.webp)
 
 That is a real session, recorded through a pty. The tab context every reply carries is elided from the recording, and [`docs/make-demo.js`](docs/make-demo.js) regenerates the image.
@@ -126,6 +151,8 @@ cic with-tab https://example.com computer '{"action":"screenshot"}' --output sho
 ```
 
 It fills in `tabId` and nothing else, so passing your own is a usage error rather than a silently ignored argument. `--keep-tab` leaves the tab for inspection.
+
+It will not close its own tab if that would take other tabs with it. Closing a group's first tab makes the bridge lose the whole group, and everything else in it becomes unreachable, so in that case the tab is left open and said so rather than closed quietly.
 
 **After an unknown outcome the tab is deliberately left open**, and its id is printed. The request reached the browser and no usable reply came back, so closing the tab could discard a half-finished action and destroy the only evidence of it. An ordinary tool error is different: the browser answered, so the tab is closed as usual. A cleanup that fails is always reported and never swallowed, whether the work succeeded or not: after a success it is a warning beside the result, and after a failure it is appended to that failure, since a tab that may still be open is exactly what you need to know while reading why the work failed.
 

@@ -22,7 +22,7 @@ const sessionTabs = require('./lib/session-tabs.js');
 const { collect, render } = sessionTabs;
 
 const SERVER_NAME = 'chrome-tabs';
-const SERVER_VERSION = '0.7.0';
+const SERVER_VERSION = '0.8.0';
 const PROTOCOL_VERSION = '2024-11-05';
 
 const TOOLS = [
