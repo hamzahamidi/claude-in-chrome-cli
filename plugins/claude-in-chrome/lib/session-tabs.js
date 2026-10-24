@@ -376,12 +376,6 @@ function renderNoTabs(unreadable, encrypted, groupCount) {
   return lines.join('\n');
 }
 
-function compareHostNames(left, right) {
-  if (left < right) return -1;
-  if (left > right) return 1;
-  return 0;
-}
-
 function renderProfile(group, { includeUrls, fullUrls }) {
   const windows = new Set(group.tabs.map((tab) => tab.window_id));
   const out = ['', `## profile ${group.profile} (${group.tabs.length} tabs, ${windows.size} window(s), ${group.session_file})`];
@@ -394,7 +388,7 @@ function renderProfile(group, { includeUrls, fullUrls }) {
     hosts.set(host, (hosts.get(host) || 0) + 1);
   }
   const top = [...hosts.entries()]
-    .sort((left, right) => right[1] - left[1] || compareHostNames(left[0], right[0]))
+    .sort((left, right) => right[1] - left[1] || (left[0] < right[0] ? -1 : Number(left[0] > right[0])))
     .slice(0, 15);
   out.push('hosts: ' + top.map(([host, count]) => `${host} (${count})`).join(', '));
   if (includeUrls) {
