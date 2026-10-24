@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.8.2 (2026-10-24)
+
+Reduces complexity in the CLI and browser bridge while preserving their existing behavior.
+
 ## 0.8.1 (2026-10-24)
 
 Updates the npm README to report coverage through SonarQube Cloud instead of Codecov. CLI and plugin behavior are unchanged.
