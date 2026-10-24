@@ -408,17 +408,14 @@ async function runTabsCommand(positional, options, provided) {
   return reportTabs(options);
 }
 
-async function requestWithRetries(plan, options) {
-  // Retries are safe only before dispatch. Backoff stays sequential so the next
-  // attempt cannot start before the prior failure has been classified.
-  for (let tries = 0; ; tries++) {
-    try {
-      return await attempt(plan, options);
-    } catch (error) {
-      const retryable = error instanceof BridgeError && !error.dispatched;
-      if (!retryable || tries >= options.retries) throw error;
-      await sleep(Math.min(RETRY_BASE_MS * (2 ** tries), RETRY_MAX_MS)); // NOSONAR Sequential retry backoff is required.
-    }
+async function requestWithRetries(plan, options, tries = 0) {
+  try {
+    return await attempt(plan, options);
+  } catch (error) {
+    const retryable = error instanceof BridgeError && !error.dispatched;
+    if (!retryable || tries >= options.retries) throw error;
+    await sleep(Math.min(RETRY_BASE_MS * (2 ** tries), RETRY_MAX_MS)); // NOSONAR Sequential retry backoff is required.
+    return requestWithRetries(plan, options, tries + 1);
   }
 }
 
