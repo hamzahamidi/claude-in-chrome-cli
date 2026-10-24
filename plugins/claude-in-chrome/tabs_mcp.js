@@ -15,7 +15,7 @@
 
 'use strict';
 
-const readline = require('readline');
+const readline = require('node:readline');
 
 const sessionTabs = require('./lib/session-tabs.js');
 
@@ -113,8 +113,8 @@ function main() {
     let response;
     try {
       response = { jsonrpc: '2.0', id: request.id, result: handle(request) };
-    } catch (exc) {
-      response = { jsonrpc: '2.0', id: request.id, error: { code: -32603, message: exc.message } };
+    } catch (error) {
+      response = { jsonrpc: '2.0', id: request.id, error: { code: -32603, message: error.message } };
     }
     process.stdout.write(JSON.stringify(response) + '\n');
   });

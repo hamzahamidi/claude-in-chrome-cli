@@ -124,11 +124,11 @@ let stdoutBroken = false;
 // a stack trace after the output had already been delivered.
 function absorbStreamError(stream) {
   stream.on('error', (error) => {
-    if (error && error.code === 'EPIPE') {
+    if (error?.code === 'EPIPE') {
       if (stream === process.stdout) { stdoutBroken = true; }
       return;
     }
-    try { process.stderr.write(`cic: ${stream === process.stdout ? 'stdout' : 'stderr'} failed: ${error && error.message}\n`); } catch { /* nothing left to write to */ }
+    try { process.stderr.write(`cic: ${stream === process.stdout ? 'stdout' : 'stderr'} failed: ${error?.message}\n`); } catch { /* nothing left to write to */ }
   });
 }
 absorbStreamError(process.stdout);
@@ -160,7 +160,7 @@ const envelope = (exitCode, message) => JSON.stringify({
 
 /** The text parts of a tool result, which is where a tool puts its complaint. */
 const textOf = (result) => (result.content || [])
-  .filter((part) => part && part.type === 'text')
+  .filter((part) => part?.type === 'text')
   .map((part) => part.text)
   .join('\n');
 
@@ -170,83 +170,91 @@ const textOf = (result) => (result.content || [])
 // mid-backoff, reporting success for a call that never happened.
 const sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
 
-function parseArguments(argv) {
-  const options = {
-    timeout: DEFAULT_TIMEOUT_SECONDS,
-    retries: 0,
-    json: false,
-    jsonl: false,
-    fullUrls: false,
-    keepTab: false,
-    output: null,
-    profile: null,
-  };
-  // Which flags were actually typed, as opposed to left at a default. A command
-  // can then refuse one it would silently ignore, rather than exiting 0 having
-  // done something other than what was asked.
-  const provided = new Set();
-  const positional = [];
-  // Scanning continues past the first mistake so that `--json` is still seen,
-  // and a --json caller gets the error envelope rather than a bare exit code.
-  let error = null;
-  const note = (message) => { error = error || message; };
+const BOOLEAN_OPTIONS = {
+  '--json': ['json', true, true],
+  '--jsonl': ['jsonl', true, true],
+  '--full-urls': ['fullUrls', true, true],
+  '--keep-tab': ['keepTab', true, true],
+  '-h': ['help', true, false],
+  '--help': ['help', true, false],
+  '-v': ['version', true, false],
+  '--version': ['version', true, false],
+};
+const VALUE_OPTIONS = { '--output': 'output', '--profile': 'profile' };
 
-  // Never swallow the next token when it is itself a flag: consuming `--json`
-  // as a value lost the very flag that decides how the error gets reported.
-  const valueFor = (flag, index) => {
-    const raw = argv[index + 1];
-    if (raw === undefined || raw.startsWith('-')) {
-      note(`${flag} wants a value, got ${raw === undefined ? 'nothing' : raw}`);
-      return null;
-    }
-    return raw;
-  };
-
-  for (let i = 0; i < argv.length; i++) {
-    const argument = argv[i];
-    if (argument === '--json') { options.json = true; provided.add('--json'); }
-    else if (argument === '--jsonl') { options.jsonl = true; provided.add('--jsonl'); }
-    else if (argument === '--full-urls') { options.fullUrls = true; provided.add('--full-urls'); }
-    else if (argument === '--keep-tab') { options.keepTab = true; provided.add('--keep-tab'); }
-    else if (argument === '-h' || argument === '--help') { options.help = true; }
-    else if (argument === '-v' || argument === '--version') { options.version = true; }
-    else if (argument === '--output' || argument === '--profile') {
-      const raw = valueFor(argument, i);
-      if (raw === null) { continue; }
-      i++;
-      provided.add(argument);
-      options[argument === '--output' ? 'output' : 'profile'] = raw;
-    } else if (argument === '--timeout') {
-      const raw = valueFor('--timeout', i);
-      if (raw === null) { continue; }
-      i++;
-      provided.add('--timeout');
-      const value = Number(raw);
-      if (!Number.isFinite(value) || value <= 0) {
-        note(`--timeout wants a positive number of seconds, got ${raw}`);
-      } else {
-        options.timeout = value;
-      }
-    } else if (argument === '--retries') {
-      const raw = valueFor('--retries', i);
-      if (raw === null) { continue; }
-      i++;
-      provided.add('--retries');
-      const value = Number(raw);
-      if (!Number.isInteger(value) || value < 0) {
-        note(`--retries wants a whole number of attempts, got ${raw}`);
-      } else {
-        options.retries = value;
-      }
-    } else if (argument.startsWith('-')) {
-      note(`unknown option ${argument}`);
-    } else {
-      positional.push(argument);
-    }
+function argumentValue(argv, index, flag, note) {
+  const raw = argv[index + 1];
+  if (raw === undefined || raw.startsWith('-')) {
+    note(`${flag} wants a value, got ${raw === undefined ? 'nothing' : raw}`);
+    return null;
   }
-  return { options, positional, provided, error };
+  return raw;
 }
 
+function setNumericOption(argument, raw, options, note) {
+  const value = Number(raw);
+  if (argument === '--timeout') {
+    if (!Number.isFinite(value) || value <= 0) {
+      note(`--timeout wants a positive number of seconds, got ${raw}`);
+    } else {
+      options.timeout = value;
+    }
+    return;
+  }
+  if (!Number.isInteger(value) || value < 0) {
+    note(`--retries wants a whole number of attempts, got ${raw}`);
+  } else {
+    options.retries = value;
+  }
+}
+
+function parseArgument(argument, argv, index, state) {
+  const booleanOption = Object.hasOwn(BOOLEAN_OPTIONS, argument) ? BOOLEAN_OPTIONS[argument] : null;
+  if (booleanOption) {
+    const [name, value, wasProvided] = booleanOption;
+    state.options[name] = value;
+    if (wasProvided) state.provided.add(argument);
+    return 1;
+  }
+
+  if (Object.hasOwn(VALUE_OPTIONS, argument) || argument === '--timeout' || argument === '--retries') {
+    const raw = argumentValue(argv, index, argument, state.note);
+    if (raw === null) return 1;
+    state.provided.add(argument);
+    if (Object.hasOwn(VALUE_OPTIONS, argument)) state.options[VALUE_OPTIONS[argument]] = raw;
+    else setNumericOption(argument, raw, state.options, state.note);
+    return 2;
+  }
+
+  if (argument.startsWith('-')) state.note(`unknown option ${argument}`);
+  else state.positional.push(argument);
+  return 1;
+}
+
+function parseArguments(argv) {
+  const state = {
+    options: {
+      timeout: DEFAULT_TIMEOUT_SECONDS,
+      retries: 0,
+      json: false,
+      jsonl: false,
+      fullUrls: false,
+      keepTab: false,
+      output: null,
+      profile: null,
+    },
+    provided: new Set(),
+    positional: [],
+    error: null,
+  };
+  state.note = (message) => { state.error = state.error || message; };
+
+  // Keep scanning after an error so a later --json still selects the envelope.
+  for (let i = 0; i < argv.length; i++) {
+    i += parseArgument(argv[i], argv, i, state) - 1;
+  }
+  return { options: state.options, positional: state.positional, provided: state.provided, error: state.error };
+}
 const COMMANDS = ['list', 'call', 'session', 'shell', 'with-tab', 'tabs'];
 
 /** Arguments JSON, or a usage error naming why it was rejected. */
@@ -254,8 +262,8 @@ function parseToolArguments(raw) {
   let parsed;
   try {
     parsed = JSON.parse(raw === undefined ? '{}' : raw);
-  } catch (failure) {
-    throw new UsageError(`arguments are not valid JSON: ${failure.message}`);
+  } catch (error) {
+    throw new UsageError(`arguments are not valid JSON: ${error.message}`);
   }
   if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
     throw new UsageError('arguments must be a JSON object.');
@@ -264,44 +272,44 @@ function parseToolArguments(raw) {
 }
 
 /** Decides what the command means, before anything is spawned. */
-function planRequest(positional) {
-  const [command, ...rest] = positional;
-  if (command !== 'list' && command !== 'call' && command !== 'with-tab') {
-    throw new UsageError(`unknown command '${command}'. Expected one of ${COMMANDS.join(', ')}.`);
-  }
-
-  if (command === 'list') {
-    if (rest.length) {
-      throw new UsageError(`list takes no arguments, got '${rest[0]}'.`);
-    }
-    return { command, method: 'tools/list', params: {} };
-  }
-
+function planWithTab(rest) {
   // with-tab takes the URL first, then the same tool name and JSON arguments
   // call takes. The tabId is the one key it fills in, which is the whole point
   // of the command; everything else stays pass-through.
-  if (command === 'with-tab') {
-    const [url, toolName, rawArguments, ...extra] = rest;
-    if (!url) { throw new UsageError('with-tab wants a url.'); }
-    if (!toolName) { throw new UsageError('with-tab wants a url and a tool name.'); }
-    if (extra.length) {
-      throw new UsageError(
-        `with-tab takes a url, a tool name and optional JSON arguments, got ${extra.length} extra: '${extra.join("', '")}'.`);
-    }
-    const toolArguments = parseToolArguments(rawArguments);
-    if ('tabId' in toolArguments) {
-      throw new UsageError('with-tab sets tabId itself, so passing one would be ignored. Use call for a tab you already have.');
-    }
-    return { command, method: 'tools/call', url, params: { name: toolName, arguments: toolArguments } };
+  const [url, toolName, rawArguments, ...extra] = rest;
+  if (!url) { throw new UsageError('with-tab wants a url.'); }
+  if (!toolName) { throw new UsageError('with-tab wants a url and a tool name.'); }
+  if (extra.length) {
+    throw new UsageError(
+      `with-tab takes a url, a tool name and optional JSON arguments, got ${extra.length} extra: '${extra.join("', '")}'.`);
   }
+  const toolArguments = parseToolArguments(rawArguments);
+  if ('tabId' in toolArguments) {
+    throw new UsageError('with-tab sets tabId itself, so passing one would be ignored. Use call for a tab you already have.');
+  }
+  return { command: 'with-tab', method: 'tools/call', url, params: { name: toolName, arguments: toolArguments } };
+}
 
+function planCall(rest) {
   const [toolName, rawArguments, ...extra] = rest;
   if (!toolName) { throw new UsageError('call wants a tool name.'); }
   if (extra.length) {
     throw new UsageError(
       `call takes a tool name and optional JSON arguments, got ${extra.length} extra: '${extra.join("', '")}'.`);
   }
-  return { command, method: 'tools/call', params: { name: toolName, arguments: parseToolArguments(rawArguments) } };
+  return { command: 'call', method: 'tools/call', params: { name: toolName, arguments: parseToolArguments(rawArguments) } };
+}
+
+function planRequest(positional) {
+  const [command, ...rest] = positional;
+  if (command !== 'list' && command !== 'call' && command !== 'with-tab') {
+    throw new UsageError(`unknown command '${command}'. Expected one of ${COMMANDS.join(', ')}.`);
+  }
+  if (command === 'list') {
+    if (rest.length) throw new UsageError(`list takes no arguments, got '${rest[0]}'.`);
+    return { command, method: 'tools/list', params: {} };
+  }
+  return command === 'with-tab' ? planWithTab(rest) : planCall(rest);
 }
 
 /**
@@ -370,123 +378,121 @@ async function reportTabs(options) {
   return EXIT.OK;
 }
 
-async function main() {
-  const { options, positional, provided, error } = parseArguments(process.argv.slice(2));
-  if (error) { throw new UsageError(error); }
-
-  if (options.version) { await writeOut(VERSION + '\n'); return EXIT.OK; }
-  if (options.help || positional.length === 0) { await writeOut(USAGE + '\n'); return EXIT.OK; }
-
-  // The streaming commands own their own loop and their own exit meaning, so
-  // they return before any of the one-shot machinery below.
-  if (positional[0] === 'session' || positional[0] === 'shell') {
-    rejectUnsupportedFlags(positional[0], provided);
+async function runSessionCommand(positional, options, provided) {
+  rejectUnsupportedFlags('session', provided);
+  if (positional.length > 1) {
+    throw new UsageError(`session takes no positional arguments, got '${positional[1]}'.`);
   }
-  if (positional[0] === 'session') {
-    if (positional.length > 1) {
-      throw new UsageError(`session takes no positional arguments, got '${positional[1]}'.`);
-    }
-    if (!options.jsonl) {
-      throw new UsageError('session needs --jsonl. It is the only protocol it speaks.');
-    }
-    return runSession({
-      timeoutSeconds: options.timeout,
-      input: process.stdin,
-      output: process.stdout,
-      jsonl: true,
-    });
-  }
-  if (positional[0] === 'shell') {
-    if (positional.length > 1) {
-      throw new UsageError(`shell takes no positional arguments, got '${positional[1]}'.`);
-    }
-    return runShell({
-      timeoutSeconds: options.timeout,
-      input: process.stdin,
-      output: process.stdout,
-    });
-  }
+  if (!options.jsonl) throw new UsageError('session needs --jsonl. It is the only protocol it speaks.');
+  return runSession({
+    timeoutSeconds: options.timeout,
+    input: process.stdin,
+    output: process.stdout,
+    jsonl: true,
+  });
+}
 
-  // Reading session files needs no bridge, no handshake and no extension, so
-  // this answers and returns before any of the transport machinery below.
-  if (positional[0] === 'tabs') {
-    rejectUnsupportedFlags('tabs', provided);
-    if (positional.length > 1) {
-      throw new UsageError(`tabs takes no positional arguments, got '${positional[1]}'.`);
-    }
-    return reportTabs(options);
+async function runShellCommand(positional, options, provided) {
+  rejectUnsupportedFlags('shell', provided);
+  if (positional.length > 1) {
+    throw new UsageError(`shell takes no positional arguments, got '${positional[1]}'.`);
   }
+  return runShell({ timeoutSeconds: options.timeout, input: process.stdin, output: process.stdout });
+}
 
-  const plan = planRequest(positional);
-  rejectUnsupportedFlags(plan.command, provided);
+async function runTabsCommand(positional, options, provided) {
+  rejectUnsupportedFlags('tabs', provided);
+  if (positional.length > 1) {
+    throw new UsageError(`tabs takes no positional arguments, got '${positional[1]}'.`);
+  }
+  return reportTabs(options);
+}
 
-  let reply;
-  // Retries are limited to failures that never reached the browser. After
-  // dispatch the outcome is unknown, and repeating a click or a script is a
-  // second action, not a second look at the first one.
+async function requestWithRetries(plan, options) {
+  // Retries are safe only before dispatch. Backoff stays sequential so the next
+  // attempt cannot start before the prior failure has been classified.
   for (let tries = 0; ; tries++) {
     try {
-      reply = await attempt(plan, options);
-      break;
-    } catch (failure) {
-      const retryable = failure instanceof BridgeError && !failure.dispatched;
-      if (!retryable || tries >= options.retries) { throw failure; }
-      await sleep(Math.min(RETRY_BASE_MS * (2 ** tries), RETRY_MAX_MS));
+      return await attempt(plan, options);
+    } catch (error) {
+      const retryable = error instanceof BridgeError && !error.dispatched;
+      if (!retryable || tries >= options.retries) throw error;
+      await sleep(Math.min(RETRY_BASE_MS * (2 ** tries), RETRY_MAX_MS)); // NOSONAR Sequential retry backoff is required.
     }
   }
+}
 
-  if (reply.error) {
-    // Guaranteed a string by the session's validation, so the envelope keeps
-    // its shape.
-    const message = reply.error.message;
-    if (options.json) { await writeOut(envelope(EXIT.TOOL_ERROR, message)); }
-    else { await writeErr(`cic: ${JSON.stringify(reply.error)}\n`); }
+async function reportToolError(reply, options) {
+  const message = reply.error.message;
+  if (options.json) await writeOut(envelope(EXIT.TOOL_ERROR, message));
+  else await writeErr(`cic: ${JSON.stringify(reply.error)}\n`);
+  return EXIT.TOOL_ERROR;
+}
+
+async function writeImageIfRequested(result, options) {
+  if (!options.output || result.isError) return;
+  const written = await writeImageResult(result, options.output);
+  const named = options.output.toLowerCase();
+  const mismatched = /\.[a-z0-9]+$/.test(named) && !named.endsWith(written.extension)
+    && !(written.extension === '.jpg' && named.endsWith('.jpeg'));
+  const message = mismatched
+    ? `cic: wrote ${written.bytes} bytes of ${written.mime} to ${options.output}, whose name suggests a different format. ${written.extension} would match the bytes.\n`
+    : `cic: wrote ${written.bytes} bytes of ${written.mime} to ${options.output}\n`;
+  await writeErr(message);
+}
+
+async function reportJsonResult(result) {
+  if (result.isError) {
+    await writeOut(envelope(EXIT.TOOL_ERROR, textOf(result) || 'the tool reported an error'));
     return EXIT.TOOL_ERROR;
   }
+  await writeOut(JSON.stringify(result) + '\n');
+  return EXIT.OK;
+}
 
-  const result = reply.result;
-
-  // Saving comes before printing, and never runs for a tool error: a failed
-  // call has no image worth keeping, and attempting one would replace the
-  // tool's complaint with a complaint about the file.
-  if (options.output && !result.isError) {
-    const written = await writeImageResult(result, options.output);
-    // A destination named .png holding a JPEG is what the bridge actually
-    // returns today, so the mismatch is said out loud rather than left for
-    // whoever opens the file. The bytes are still written: the caller asked for
-    // this path, and renaming it for them would be a surprise of its own.
-    const named = options.output.toLowerCase();
-    const mismatched = /\.[a-z0-9]+$/.test(named) && !named.endsWith(written.extension)
-      && !(written.extension === '.jpg' && named.endsWith('.jpeg'));
-    // stderr, so a caller piping stdout gets the result and not this.
-    await writeErr(mismatched
-      ? `cic: wrote ${written.bytes} bytes of ${written.mime} to ${options.output}, whose name suggests a different format. ${written.extension} would match the bytes.\n`
-      : `cic: wrote ${written.bytes} bytes of ${written.mime} to ${options.output}\n`);
-  }
-
-  if (options.json) {
-    // isError is the tool saying it failed, so --json owes the caller the
-    // frozen error envelope, not the raw result it would print on success.
-    if (result.isError) {
-      await writeOut(envelope(EXIT.TOOL_ERROR, textOf(result) || 'the tool reported an error'));
-      return EXIT.TOOL_ERROR;
-    }
-    await writeOut(JSON.stringify(result) + '\n');
-    return EXIT.OK;
-  }
-
-  // One write rather than one per line: a page-text dump is a single large
-  // string, and every await here is a chance to be interrupted.
+async function reportPlainResult(plan, result) {
   const lines = plan.command === 'list'
     ? (result.tools || []).map((tool) => `- ${tool.name} :: ${(tool.description || '').split('\n')[0].slice(0, 80)}`)
     : (result.content || []).map((part) => (part.type === 'text' ? part.text : `[${part.type || '?'}]`));
-  if (lines.length) { await writeOut(lines.join('\n') + '\n'); }
-
-  // isError printed its text above, the way the shell version did, but exits
-  // non-zero, which the shell version did not: pipelines carried on regardless.
+  if (lines.length) await writeOut(lines.join('\n') + '\n');
   return result.isError ? EXIT.TOOL_ERROR : EXIT.OK;
 }
 
+async function reportReply(plan, reply, options) {
+  if (reply.error) return reportToolError(reply, options);
+  const result = reply.result;
+  await writeImageIfRequested(result, options);
+  return options.json ? reportJsonResult(result) : reportPlainResult(plan, result);
+}
+
+async function runOneShot(positional, options, provided) {
+  const plan = planRequest(positional);
+  rejectUnsupportedFlags(plan.command, provided);
+  const reply = await requestWithRetries(plan, options);
+  return reportReply(plan, reply, options);
+}
+
+async function dispatchCommand(positional, options, provided) {
+  const command = positional[0];
+  if (command === 'session') return runSessionCommand(positional, options, provided);
+  if (command === 'shell') return runShellCommand(positional, options, provided);
+  if (command === 'tabs') return runTabsCommand(positional, options, provided);
+  return runOneShot(positional, options, provided);
+}
+
+async function main() {
+  const { options, positional, provided, error } = parseArguments(process.argv.slice(2));
+  if (error) throw new UsageError(error);
+  if (options.version) {
+    await writeOut(VERSION + '\n');
+    return EXIT.OK;
+  }
+  if (options.help || positional.length === 0) {
+    await writeOut(USAGE + '\n');
+    return EXIT.OK;
+  }
+  return dispatchCommand(positional, options, provided);
+}
 /**
  * A failure before the request went out can never be UNKNOWN, and one after it
  * can never be TRANSPORT, because the browser may already have acted.
@@ -506,31 +512,33 @@ function classify(failure) {
   return EXIT.TRANSPORT;
 }
 
-(async () => {
+async function runCli() {
   let asJson = false;
   try {
     // Parsed twice on the failure path only, so the error formatter knows
     // whether --json was asked for even when parsing itself failed.
     asJson = parseArguments(process.argv.slice(2)).options.json;
     process.exitCode = await main();
-  } catch (failure) {
-    const exitCode = classify(failure);
-    const known = failure instanceof UsageError || failure instanceof BridgeError
-      || failure instanceof ImageOutputError || failure instanceof TabLifecycleError;
-    let message = known ? failure.message : `unexpected failure: ${failure && failure.message}`;
+  } catch (error) {
+    const exitCode = classify(error);
+    const known = error instanceof UsageError || error instanceof BridgeError
+      || error instanceof ImageOutputError || error instanceof TabLifecycleError;
+    let message = known ? error.message : `unexpected failure: ${error?.message}`;
     // A tab deliberately left open is only useful if its id is said out loud,
     // since the whole reason for keeping it is that someone has to look at it.
-    if (failure && failure.tabLeftOpen) {
-      message += ` Tab ${failure.tabId} was left open on purpose, because closing a tab whose outcome is unknown could discard what it was doing.`;
+    if (error?.tabLeftOpen) {
+      message += ` Tab ${error.tabId} was left open on purpose, because closing a tab whose outcome is unknown could discard what it was doing.`;
     }
     // A cleanup that also failed is appended rather than dropped. Reporting only
     // why the work failed, while its tab is still sitting there, hides the one
     // thing this command exists to get right.
-    if (failure && failure.tabWarning) { message += ` ${failure.tabWarning}`; }
+    if (error?.tabWarning) { message += ` ${error.tabWarning}`; }
     try {
       if (asJson) { await writeOut(envelope(exitCode, message)); }
       else { await writeErr(`cic: ${message}\n`); }
     } catch { /* the caller closed the stream; the exit code still stands */ }
     process.exitCode = exitCode;
   }
-})();
+}
+
+void runCli();
