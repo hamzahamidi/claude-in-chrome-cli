@@ -22,8 +22,8 @@ class TabLifecycleError extends Error {
   }
 }
 
-const textOf = (result) => (result && result.content ? result.content : [])
-  .filter((part) => part && part.type === 'text')
+const textOf = (result) => (result?.content || [])
+  .filter((part) => part?.type === 'text')
   .map((part) => part.text)
   .join('\n');
 
@@ -102,9 +102,9 @@ async function closeTab(session, tabId, timeoutSeconds, { keepGroupAlive = false
   try {
     context = contextOf(await session.call('tools/call',
       { name: 'tabs_context_mcp', arguments: {} }, { timeoutSeconds }));
-  } catch (failure) {
+  } catch (error) {
     return `tab ${tabId} was left open: the group could not be read first, and closing blind `
-      + `risks orphaning tabs in it (${failure.message})`;
+      + `risks orphaning tabs in it (${error.message})`;
   }
   if (context === null) {
     return `tab ${tabId} was left open: the group could not be read first, and closing blind `
@@ -132,8 +132,8 @@ async function closeTab(session, tabId, timeoutSeconds, { keepGroupAlive = false
       { name: 'tabs_close_mcp', arguments: { tabId } }, { timeoutSeconds });
     const refusal = refusalIn(reply);
     return refusal ? `tab ${tabId} may still be open: ${refusal}` : null;
-  } catch (failure) {
-    return `tab ${tabId} may still be open: ${failure.message}`;
+  } catch (error) {
+    return `tab ${tabId} may still be open: ${error.message}`;
   }
 }
 
@@ -154,7 +154,7 @@ async function closeTab(session, tabId, timeoutSeconds, { keepGroupAlive = false
  * is attached to that failure as `tabWarning`, because a tab that may still be
  * open is exactly what someone needs to know while reading why the work failed.
  */
-async function withTab(session, { url, keepTab = false, timeoutSeconds } = {}, body) {
+async function openWorkTab(session, timeoutSeconds) {
   // tabs_create_mcp requires a group to exist already: with none, it refuses and
   // points at tabs_context_mcp. Shipped 0.7.0 called it straight away and so
   // failed for anyone whose group was empty, which is the ordinary case. Every
@@ -168,28 +168,25 @@ async function withTab(session, { url, keepTab = false, timeoutSeconds } = {}, b
   const existing = tabsIn(contextOf(await session.call('tools/call',
     { name: 'tabs_context_mcp', arguments: {} }, { timeoutSeconds })));
 
-  let tabId;
-  // True when this call is what brought the group into being, which is the only
-  // case where emptying it again would strand a pill.
-  let openedGroup = false;
-  if (existing.length === 0) {
-    openedGroup = true;
-    const opened = await session.call('tools/call',
-      { name: 'tabs_context_mcp', arguments: { createIfEmpty: true } }, { timeoutSeconds });
-    const openRefusal = refusalIn(opened);
-    if (openRefusal) { throw new TabLifecycleError(`could not open a tab group: ${openRefusal}`); }
-    const tabs = tabsIn(contextOf(opened));
-    if (tabs.length === 0) {
-      throw new TabLifecycleError('could not open a tab group to work in');
-    }
-    tabId = tabs[0].tabId;
-  } else {
+  if (existing.length > 0) {
     const created = await session.call('tools/call',
       { name: 'tabs_create_mcp', arguments: {} }, { timeoutSeconds });
     const createRefusal = refusalIn(created);
     if (createRefusal) { throw new TabLifecycleError(`could not create a tab: ${createRefusal}`); }
-    tabId = tabIdFrom(created.result);
+    return { tabId: tabIdFrom(created.result), openedGroup: false };
   }
+
+  const opened = await session.call('tools/call',
+    { name: 'tabs_context_mcp', arguments: { createIfEmpty: true } }, { timeoutSeconds });
+  const openRefusal = refusalIn(opened);
+  if (openRefusal) { throw new TabLifecycleError(`could not open a tab group: ${openRefusal}`); }
+  const tabs = tabsIn(contextOf(opened));
+  if (tabs.length === 0) throw new TabLifecycleError('could not open a tab group to work in');
+  return { tabId: tabs[0].tabId, openedGroup: true };
+}
+
+async function withTab(session, { url, keepTab = false, timeoutSeconds } = {}, body) {
+  const { tabId, openedGroup } = await openWorkTab(session, timeoutSeconds);
 
   try {
     if (url !== undefined) {
@@ -204,22 +201,22 @@ async function withTab(session, { url, keepTab = false, timeoutSeconds } = {}, b
       if (warning) { return { outcome, tabWarning: warning, tabId }; }
     }
     return { outcome, tabId };
-  } catch (failure) {
+  } catch (error) {
     // Only a dispatched failure is unknown. One that never reached the browser
     // leaves the tab in a known state, so it is still tidied up.
-    if (failure instanceof BridgeError && failure.dispatched) {
-      failure.tabId = tabId;
-      failure.tabLeftOpen = true;
-      throw failure;
+    if (error instanceof BridgeError && error.dispatched) {
+      error.tabId = tabId;
+      error.tabLeftOpen = true;
+      throw error;
     }
     if (!keepTab) {
       const warning = await closeTab(session, tabId, timeoutSeconds, { keepGroupAlive: openedGroup });
       if (warning) {
-        failure.tabWarning = warning;
-        failure.tabId = tabId;
+        error.tabWarning = warning;
+        error.tabId = tabId;
       }
     }
-    throw failure;
+    throw error;
   }
 }
 

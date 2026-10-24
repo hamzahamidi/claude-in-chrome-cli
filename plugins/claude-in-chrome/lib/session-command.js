@@ -7,7 +7,7 @@
 // control flow here, because those belong to whatever is driving it.
 'use strict';
 
-const readline = require('readline');
+const readline = require('node:readline');
 
 const { BridgeSession, BridgeError } = require('./bridge-session.js');
 const { adoptTab } = require('./tab-adoption.js');
@@ -25,7 +25,7 @@ const KIND = {
 
 /** The text parts of a tool result, which is where a tool puts its complaint. */
 const textOf = (result) => (result.content || [])
-  .filter((part) => part && part.type === 'text')
+  .filter((part) => part?.type === 'text')
   .map((part) => part.text)
   .join('\n');
 
@@ -112,10 +112,10 @@ async function runSession({ timeoutSeconds, input, output, jsonl }) {
   const session = new BridgeSession({ timeoutSeconds });
   try {
     await session.open();
-  } catch (failure) {
-    await writeLine(output, failureRecord(null, classify(failure), failure.message) + '\n');
+  } catch (error) {
+    await writeLine(output, failureRecord(null, classify(error), error.message) + '\n');
     await session.close();
-    return classify(failure);
+    return classify(error);
   }
 
   const lines = readline.createInterface({ input, terminal: false });
@@ -133,8 +133,8 @@ async function runSession({ timeoutSeconds, input, output, jsonl }) {
       if (!trimmed) { return; }
 
       let record;
-      try { record = JSON.parse(trimmed); } catch (failure) {
-        await writeLine(output, failureRecord(null, EXIT.USAGE, `line is not valid JSON: ${failure.message}`) + '\n');
+      try { record = JSON.parse(trimmed); } catch (error) {
+        await writeLine(output, failureRecord(null, EXIT.USAGE, `line is not valid JSON: ${error.message}`) + '\n');
         return;
       }
 
@@ -159,9 +159,9 @@ async function runSession({ timeoutSeconds, input, output, jsonl }) {
           return;
         }
         await writeLine(output, successRecord(plan.id, reply.result) + '\n');
-      } catch (failure) {
-        const code = classify(failure);
-        await writeLine(output, failureRecord(plan.id, code, failure.message) + '\n');
+      } catch (error) {
+        const code = classify(error);
+        await writeLine(output, failureRecord(plan.id, code, error.message) + '\n');
         // An unknown outcome ends the session. The request was sent and nobody
         // knows whether the browser acted on it, so continuing would let a
         // later call race an earlier one whose effect is undetermined. The
@@ -172,10 +172,10 @@ async function runSession({ timeoutSeconds, input, output, jsonl }) {
           stopReading();
         }
       }
-    }).catch((failure) => {
+    }).catch((error) => {
       // A crash handling one record is that record's problem, reported and
       // survived, rather than a silent hole in every record queued behind it.
-      output.write(failureRecord(null, EXIT.TRANSPORT, `failed handling a record: ${failure && failure.message}`) + '\n');
+      output.write(failureRecord(null, EXIT.TRANSPORT, `failed handling a record: ${error?.message}`) + '\n');
       /* not awaited: this is the last-resort path and must never itself hang */
     });
     return queue;
@@ -196,7 +196,8 @@ async function runSession({ timeoutSeconds, input, output, jsonl }) {
   await new Promise((resolve) => {
     lines.on('line', (line) => {
       input.pause?.();
-      handle(line).then(() => { if (!fatal) { input.resume?.(); } });
+      void handle(line).then(() => { if (!fatal) { input.resume?.(); } })
+        .catch((error) => { output.write(failureRecord(null, EXIT.TRANSPORT, error.message) + '\n'); });
     });
     lines.on('close', () => { queue.then(resolve, resolve); });
   });
@@ -285,8 +286,8 @@ async function runAdopt(session, rl, output, anchors) {
     }
     if (result.outcome === 'cancelled') { output.write('Cancelled. No page was touched.\n\n'); return; }
     output.write('No tab was moved in, so nothing was adopted. No page was touched.\n\n');
-  } catch (failure) {
-    output.write(`cic: ${failure.message}\n\n`);
+  } catch (error) {
+    output.write(`cic: ${error.message}\n\n`);
   } finally {
     process.removeListener('SIGINT', onInterrupt);
     rl.removeListener('SIGINT', onInterrupt);
@@ -308,10 +309,10 @@ async function runShell({ timeoutSeconds, input, output }) {
   const session = new BridgeSession({ timeoutSeconds });
   try {
     await session.open();
-  } catch (failure) {
-    output.write(`cic: ${failure.message}\n`);
+  } catch (error) {
+    output.write(`cic: ${error.message}\n`);
     await session.close();
-    return classify(failure);
+    return classify(error);
   }
 
   const rl = readline.createInterface({ input, output, prompt: 'cic> ' });
@@ -357,8 +358,8 @@ async function runShell({ timeoutSeconds, input, output }) {
       const rest = space === -1 ? '{}' : line.slice(space + 1).trim() || '{}';
 
       let args;
-      try { args = JSON.parse(rest); } catch (failure) {
-        output.write(`cic: arguments are not valid JSON: ${failure.message}\n`);
+      try { args = JSON.parse(rest); } catch (error) {
+        output.write(`cic: arguments are not valid JSON: ${error.message}\n`);
         prompt();
         return;
       }
@@ -378,9 +379,9 @@ async function runShell({ timeoutSeconds, input, output }) {
           output.write((text || '(no text content)') + '\n');
           if (reply.result.isError) { output.write('cic: the tool reported an error\n'); }
         }
-      } catch (failure) {
-        const code = classify(failure);
-        output.write(`cic: ${failure.message}\n`);
+      } catch (error) {
+        const code = classify(error);
+        output.write(`cic: ${error.message}\n`);
         // Same rule as the JSONL path, for the same reason: after an unknown
         // outcome the session cannot be trusted to order anything else.
         if (code === EXIT.UNKNOWN) {
@@ -393,9 +394,9 @@ async function runShell({ timeoutSeconds, input, output }) {
         }
       }
       prompt();
-    }).catch((failure) => {
+    }).catch((error) => {
       // Never let one line's crash stop the rest from running.
-      output.write(`cic: ${failure && failure.message}\n`);
+      output.write(`cic: ${error?.message}\n`);
     });
     return queue;
   });

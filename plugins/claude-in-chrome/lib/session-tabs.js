@@ -10,9 +10,9 @@
 
 'use strict';
 
-const fs = require('fs');
-const os = require('os');
-const path = require('path');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 
 // chromium/components/sessions/core/session_service_commands.cc
 const CMD_SET_TAB_WINDOW = 0;
@@ -213,111 +213,102 @@ function navigation(payload) {
 
 // Returns { tabs, validMagic, truncated }. tabs is whatever could be
 // recovered even when truncated is true: a partial answer beats none.
-function parseSession(filePath) {
-  const blob = fs.readFileSync(filePath);
-  const { records, validMagic, truncated } = readRecords(blob);
-
-  const tabToWindow = new Map();
-  const closedTabs = new Set();
-  const closedWindows = new Set();
-  const navByTab = new Map(); // tab -> Map(index -> {url, title})
-  const selectedIndex = new Map(); // tab -> currently selected nav index
-
-  for (const [cmd, payload] of records) {
-    if (cmd === CMD_SET_TAB_WINDOW && payload.length >= 8) {
-      tabToWindow.set(payload.readInt32LE(4), payload.readInt32LE(0));
-    } else if (cmd === CMD_TAB_CLOSED && payload.length >= 4) {
-      closedTabs.add(payload.readInt32LE(0));
-    } else if (cmd === CMD_WINDOW_CLOSED && payload.length >= 4) {
-      closedWindows.add(payload.readInt32LE(0));
-    } else if (cmd === CMD_SET_SELECTED_NAVIGATION_INDEX && payload.length >= 8) {
-      selectedIndex.set(payload.readInt32LE(0), payload.readInt32LE(4));
-    } else if (cmd === CMD_UPDATE_TAB_NAVIGATION && payload.length >= 16) {
-      const entry = navigation(payload);
-      if (entry) {
-        if (!navByTab.has(entry.tab)) navByTab.set(entry.tab, new Map());
-        navByTab.get(entry.tab).set(entry.index, { url: entry.url, title: entry.title });
-      }
-    }
+function applySessionRecord(cmd, payload, state) {
+  if (cmd === CMD_SET_TAB_WINDOW && payload.length >= 8) {
+    state.tabToWindow.set(payload.readInt32LE(4), payload.readInt32LE(0));
+  } else if (cmd === CMD_TAB_CLOSED && payload.length >= 4) {
+    state.closedTabs.add(payload.readInt32LE(0));
+  } else if (cmd === CMD_WINDOW_CLOSED && payload.length >= 4) {
+    state.closedWindows.add(payload.readInt32LE(0));
+  } else if (cmd === CMD_SET_SELECTED_NAVIGATION_INDEX && payload.length >= 8) {
+    state.selectedIndex.set(payload.readInt32LE(0), payload.readInt32LE(4));
+  } else if (cmd === CMD_UPDATE_TAB_NAVIGATION && payload.length >= 16) {
+    applyNavigation(payload, state.navByTab);
   }
+}
 
-  const tabs = [];
+function applyNavigation(payload, navByTab) {
+  const entry = navigation(payload);
+  if (!entry) return;
+  if (!navByTab.has(entry.tab)) navByTab.set(entry.tab, new Map());
+  navByTab.get(entry.tab).set(entry.index, { url: entry.url, title: entry.title });
+}
+
+function sessionTabsFromState({ tabToWindow, closedTabs, closedWindows, navByTab, selectedIndex }) {
   const entries = [...tabToWindow.entries()].sort((a, b) => a[1] - b[1] || a[0] - b[0]);
-  for (const [tab, window] of entries) {
-    if (closedTabs.has(tab) || closedWindows.has(window)) continue;
+  return entries.flatMap(([tab, window]) => {
+    if (closedTabs.has(tab) || closedWindows.has(window)) return [];
     const byIndex = navByTab.get(tab);
     let entry = { url: '', title: '' };
-    if (byIndex && byIndex.size) {
+    if (byIndex?.size) {
       const wanted = selectedIndex.get(tab);
       const index = byIndex.has(wanted) ? wanted : Math.max(...byIndex.keys());
       entry = byIndex.get(index);
     }
-    tabs.push({ tab_id: tab, window_id: window, url: entry.url, title: entry.title });
-  }
+    return [{ tab_id: tab, window_id: window, url: entry.url, title: entry.title }];
+  });
+}
+
+function parseSession(filePath) {
+  const blob = fs.readFileSync(filePath);
+  const { records, validMagic, truncated } = readRecords(blob);
+
+  const state = {
+    tabToWindow: new Map(), closedTabs: new Set(), closedWindows: new Set(),
+    navByTab: new Map(), selectedIndex: new Map(),
+  };
+  for (const [cmd, payload] of records) applySessionRecord(cmd, payload, state);
+  const tabs = sessionTabsFromState(state);
   return { tabs, validMagic, truncated };
 }
 
 // Tries session files newest first. A file this parser does not recognize,
 // or a truncated one that recovered nothing, is skipped in favor of an
 // older one rather than reported as "no tabs".
-function collect(profileFilter) {
-  const results = [];
-  for (const udd of userDataDirs()) {
-    for (const profile of profileDirs(udd)) {
-      if (profileFilter && profile !== profileFilter) continue;
-      const files = sessionFilesNewestFirst(udd, profile);
-      const encrypted = hasEncryptedSessionData(udd, profile);
+function resultForProfile(userDataDir, profile) {
+  const files = sessionFilesNewestFirst(userDataDir, profile);
+  const encrypted = hasEncryptedSessionData(userDataDir, profile);
+  if (!files.length) return unreadableProfile(userDataDir, profile, encrypted);
 
-      if (!files.length) {
-        // No cleartext session file at all. If this profile has moved to
-        // Chrome's encrypted session storage, say so explicitly: it is a
-        // permanent, by-design gap, not the same as "nothing here."
-        results.push({
-          user_data_dir: udd,
-          profile,
-          session_file: null,
-          tabs: [],
-          status: encrypted ? 'encrypted' : 'unreadable',
-        });
-        continue;
-      }
+  const selected = newestUsableSession(files);
+  if (!selected) return unreadableProfile(userDataDir, profile, encrypted);
+  return {
+    user_data_dir: userDataDir,
+    profile,
+    session_file: path.basename(selected.file),
+    tabs: selected.result.tabs,
+    status: selected.result.truncated ? 'incomplete' : 'ok',
+  };
+}
 
-      let chosen = null;
-      let chosenFile = null;
-      for (const file of files) {
-        let result;
-        try {
-          result = parseSession(file);
-        } catch {
-          continue;
-        }
-        if (!result.validMagic) continue;
-        if (result.truncated && result.tabs.length === 0) continue;
-        chosen = result;
-        chosenFile = file;
-        break;
-      }
+function unreadableProfile(userDataDir, profile, encrypted) {
+  return {
+    user_data_dir: userDataDir,
+    profile,
+    session_file: null,
+    tabs: [],
+    status: encrypted ? 'encrypted' : 'unreadable',
+  };
+}
 
-      if (!chosen) {
-        results.push({
-          user_data_dir: udd,
-          profile,
-          session_file: null,
-          tabs: [],
-          status: encrypted ? 'encrypted' : 'unreadable',
-        });
-        continue;
-      }
-      results.push({
-        user_data_dir: udd,
-        profile,
-        session_file: path.basename(chosenFile),
-        tabs: chosen.tabs,
-        status: chosen.truncated ? 'incomplete' : 'ok',
-      });
+function newestUsableSession(files) {
+  for (const file of files) {
+    let result;
+    try {
+      result = parseSession(file);
+    } catch {
+      continue;
     }
+    if (!result.validMagic || (result.truncated && result.tabs.length === 0)) continue;
+    return { file, result };
   }
-  return results;
+  return null;
+}
+
+function collect(profileFilter) {
+  return userDataDirs().flatMap((userDataDir) => profileDirs(userDataDir)
+    .filter((profile) => !profileFilter || profile === profileFilter)
+    .map((profile) => resultForProfile(userDataDir, profile)));
 }
 
 function hostnameOf(url) {
@@ -364,43 +355,59 @@ function redactUrl(url) {
   return u.protocol;
 }
 
-function render(groups, { includeUrls = true, fullUrls = false } = {}) {
-  if (!groups.length) {
-    return (
-      'No Chrome or Chromium session data found. Looked for ' +
-      '<user data dir>/<profile>/{Sessions,Sessions_Encrypted}/Session_*.'
+function renderNoTabs(unreadable, encrypted, groupCount) {
+  const lines = [];
+  if (unreadable.length + encrypted.length < groupCount) {
+    lines.push('Chrome session files were found, but no profile has an open tab.');
+  }
+  if (unreadable.length) {
+    lines.push(
+      `${unreadable.length} profile(s) could not be read (${unreadable.map((g) => g.profile).join(', ')}): ` +
+        'every session file for them was unrecognized or too damaged to parse. This can mean a Chrome ' +
+        'version this parser has not seen, or a file caught mid-write; it is not the same as having no tabs.'
     );
   }
-
-  const unreadable = groups.filter((g) => g.status === 'unreadable');
-  const encrypted = groups.filter((g) => g.status === 'encrypted');
-  const withTabs = groups.filter((g) => g.tabs.length);
-
-  if (!withTabs.length) {
-    const lines = [];
-    if (unreadable.length + encrypted.length < groups.length) {
-      lines.push('Chrome session files were found, but no profile has an open tab.');
-    }
-    if (unreadable.length) {
-      lines.push(
-        `${unreadable.length} profile(s) could not be read (${unreadable.map((g) => g.profile).join(', ')}): ` +
-          'every session file for them was unrecognized or too damaged to parse. This can mean a Chrome ' +
-          'version this parser has not seen, or a file caught mid-write; it is not the same as having no tabs.'
-      );
-    }
-    if (encrypted.length) {
-      lines.push(
-        `${encrypted.length} profile(s) use Chrome's encrypted session storage (${encrypted.map((g) => g.profile).join(', ')}), ` +
-          'which this tool cannot decrypt. This is a permanent limitation for those profiles, not a corrupt or missing file.'
-      );
-    }
-    return lines.join('\n');
+  if (encrypted.length) {
+    lines.push(
+      `${encrypted.length} profile(s) use Chrome's encrypted session storage (${encrypted.map((g) => g.profile).join(', ')}), ` +
+        'which this tool cannot decrypt. This is a permanent limitation for those profiles, not a corrupt or missing file.'
+    );
   }
+  return lines.join('\n');
+}
 
+function renderProfile(group, { includeUrls, fullUrls }) {
+  const windows = new Set(group.tabs.map((tab) => tab.window_id));
+  const out = ['', `## profile ${group.profile} (${group.tabs.length} tabs, ${windows.size} window(s), ${group.session_file})`];
+  if (group.status === 'incomplete') {
+    out.push('note: this profile\'s session file was truncated or partly unreadable; the list below may be incomplete.');
+  }
+  const hosts = new Map();
+  for (const tab of group.tabs) {
+    const host = hostnameOf(tab.url);
+    hosts.set(host, (hosts.get(host) || 0) + 1);
+  }
+  const top = [...hosts.entries()]
+    .sort((left, right) => right[1] - left[1] || (left[0] < right[0] ? -1 : Number(left[0] > right[0])))
+    .slice(0, 15);
+  out.push('hosts: ' + top.map(([host, count]) => `${host} (${count})`).join(', '));
+  if (includeUrls) {
+    for (const tab of group.tabs) {
+      const label = (tab.title || '(no title)').slice(0, 70);
+      const shown = (fullUrls ? tab.url : redactUrl(tab.url)).slice(0, 160);
+      out.push(`  [w${tab.window_id}] ${label} :: ${shown}`);
+    }
+  }
+  return out;
+}
+
+function renderWithTabs(withTabs, unreadable, encrypted, options) {
   const out = [];
   const total = withTabs.reduce((n, g) => n + g.tabs.length, 0);
-  out.push(`${total} open tab(s) across ${withTabs.length} profile(s), read from disk.`);
-  out.push('This is a snapshot Chrome writes periodically, so it can lag by a little.');
+  out.push(
+    `${total} open tab(s) across ${withTabs.length} profile(s), read from disk.`,
+    'This is a snapshot Chrome writes periodically, so it can lag by a little.'
+  );
   if (unreadable.length) {
     out.push(
       `${unreadable.length} other profile(s) could not be read and are omitted: ` +
@@ -416,31 +423,23 @@ function render(groups, { includeUrls = true, fullUrls = false } = {}) {
         '.'
     );
   }
-  for (const g of withTabs) {
-    const windows = new Set(g.tabs.map((t) => t.window_id));
-    out.push('');
-    out.push(`## profile ${g.profile} (${g.tabs.length} tabs, ${windows.size} window(s), ${g.session_file})`);
-    if (g.status === 'incomplete') {
-      out.push('note: this profile\'s session file was truncated or partly unreadable; the list below may be incomplete.');
-    }
-    const hosts = new Map();
-    for (const t of g.tabs) {
-      const host = hostnameOf(t.url);
-      hosts.set(host, (hosts.get(host) || 0) + 1);
-    }
-    const top = [...hosts.entries()]
-      .sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
-      .slice(0, 15);
-    out.push('hosts: ' + top.map(([h, c]) => `${h} (${c})`).join(', '));
-    if (includeUrls) {
-      for (const t of g.tabs) {
-        const label = (t.title || '(no title)').slice(0, 70);
-        const shown = (fullUrls ? t.url : redactUrl(t.url)).slice(0, 160);
-        out.push(`  [w${t.window_id}] ${label} :: ${shown}`);
-      }
-    }
-  }
+  for (const group of withTabs) out.push(...renderProfile(group, options));
   return out.join('\n');
+}
+
+function render(groups, { includeUrls = true, fullUrls = false } = {}) {
+  if (!groups.length) {
+    return (
+      'No Chrome or Chromium session data found. Looked for ' +
+      '<user data dir>/<profile>/{Sessions,Sessions_Encrypted}/Session_*.'
+    );
+  }
+
+  const unreadable = groups.filter((g) => g.status === 'unreadable');
+  const encrypted = groups.filter((g) => g.status === 'encrypted');
+  const withTabs = groups.filter((g) => g.tabs.length);
+  if (!withTabs.length) return renderNoTabs(unreadable, encrypted, groups.length);
+  return renderWithTabs(withTabs, unreadable, encrypted, { includeUrls, fullUrls });
 }
 module.exports = {
   collect,

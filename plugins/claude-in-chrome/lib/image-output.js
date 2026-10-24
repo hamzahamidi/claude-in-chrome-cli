@@ -11,8 +11,8 @@
 // an image rather than for screenshots specifically.
 'use strict';
 
-const fs = require('fs');
-const path = require('path');
+const fs = require('node:fs');
+const path = require('node:path');
 
 /**
  * Magic bytes per format, and how each one proves it is not cut short.
@@ -93,8 +93,8 @@ function isWholeWebp(buffer) {
 /** Raised for anything that should stop the write before a file is touched. */
 class ImageOutputError extends Error {}
 
-const imageParts = (result) => (result && result.content ? result.content : [])
-  .filter((part) => part && part.type === 'image');
+const imageParts = (result) => (result?.content || [])
+  .filter((part) => part?.type === 'image');
 
 const startsWith = (buffer, bytes, offset = 0) => bytes.every((byte, i) => buffer[offset + i] === byte);
 
@@ -171,10 +171,10 @@ async function writeAtomically(destination, buffer) {
     await handle.close();
     handle = null;
     await fs.promises.rename(temporary, destination);
-  } catch (failure) {
+  } catch (error) {
     if (handle) { try { await handle.close(); } catch { /* already gone */ } }
     try { await fs.promises.unlink(temporary); } catch { /* never created */ }
-    throw new ImageOutputError(`could not write ${destination}: ${failure.message}`);
+    throw new ImageOutputError(`could not write ${destination}: ${error.message}`);
   }
 }
 

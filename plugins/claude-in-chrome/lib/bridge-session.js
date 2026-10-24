@@ -11,7 +11,7 @@
 // reached the child.
 'use strict';
 
-const { spawn } = require('child_process');
+const { spawn } = require('node:child_process');
 
 const CLIENT_PROTOCOL = '2024-11-05';
 // Versions whose handshake this client understands. A server answering with
@@ -55,30 +55,21 @@ function describeBadError(error) {
  * disagreed about them: plain printed `undefined` for a text part with no text
  * while --json passed the same part through as a success.
  */
-function describeBadResult(result, method) {
-  if (!isPlainObject(result)) { return 'a result that is not an object'; }
-
-  if (method === 'initialize') {
-    if (typeof result.protocolVersion !== 'string') {
-      return 'an initialize result whose protocolVersion is not a string';
+function describeBadToolsListResult(result) {
+  if (!Array.isArray(result.tools)) { return 'a tools/list result without a tools array'; }
+  for (const tool of result.tools) {
+    if (!isPlainObject(tool)) { return 'a tools/list result holding an entry that is not an object'; }
+    if (typeof tool.name !== 'string' || tool.name === '') {
+      return 'a tools/list result holding a tool without a name';
     }
-    return null;
-  }
-
-  if (method === 'tools/list') {
-    if (!Array.isArray(result.tools)) { return 'a tools/list result without a tools array'; }
-    for (const tool of result.tools) {
-      if (!isPlainObject(tool)) { return 'a tools/list result holding an entry that is not an object'; }
-      if (typeof tool.name !== 'string' || tool.name === '') {
-        return 'a tools/list result holding a tool without a name';
-      }
-      if (tool.description !== undefined && typeof tool.description !== 'string') {
-        return 'a tools/list result holding a tool whose description is not a string';
-      }
+    if (tool.description !== undefined && typeof tool.description !== 'string') {
+      return 'a tools/list result holding a tool whose description is not a string';
     }
-    return null;
   }
+  return null;
+}
 
+function describeBadToolsCallResult(result) {
   if (!Array.isArray(result.content)) { return 'a tools/call result without a content array'; }
   // isError decides the exit code, so a non-boolean here would make the
   // difference between success and failure depend on JavaScript truthiness.
@@ -97,6 +88,18 @@ function describeBadResult(result, method) {
   return null;
 }
 
+function describeBadResult(result, method) {
+  if (!isPlainObject(result)) { return 'a result that is not an object'; }
+  if (method === 'initialize') {
+    return typeof result.protocolVersion === 'string'
+      ? null
+      : 'an initialize result whose protocolVersion is not a string';
+  }
+  return method === 'tools/list'
+    ? describeBadToolsListResult(result)
+    : describeBadToolsCallResult(result);
+}
+
 /**
  * Describes what is wrong with a reply, or returns null when it is usable.
  *
@@ -107,8 +110,8 @@ function describeBadResult(result, method) {
  * and exited 0.
  */
 function describeBadReply(reply, method) {
-  const hasResult = Object.prototype.hasOwnProperty.call(reply, 'result');
-  const hasError = Object.prototype.hasOwnProperty.call(reply, 'error');
+  const hasResult = Object.hasOwn(reply, 'result');
+  const hasError = Object.hasOwn(reply, 'error');
 
   // JSON-RPC allows exactly one. Both together means the server contradicted
   // itself, and picking either one is guessing which half to believe.
@@ -151,8 +154,8 @@ class BridgeSession {
   async open() {
     try {
       this.child = spawn(this.binary, this.binaryArguments, { stdio: ['pipe', 'pipe', 'inherit'] });
-    } catch (failure) {
-      throw new BridgeError(`could not start ${this.binary}: ${failure.message}`, { handshake: true });
+    } catch (error) {
+      throw new BridgeError(`could not start ${this.binary}: ${error.message}`, { handshake: true });
     }
     this.#attachReader();
 
@@ -284,9 +287,9 @@ class BridgeSession {
           } else { resolve(); }
         });
       });
-    } catch (writeFailure) {
+    } catch (error) {
       if (pending) { await pending; }
-      throw writeFailure;
+      throw error;
     }
   }
 
@@ -336,7 +339,7 @@ class BridgeSession {
     // A child that dies fails every outstanding call, each classified by
     // whether its own request had been written.
     const failAll = (message) => {
-      for (const waiter of [...this.waiters.values()]) { waiter.fail(message); }
+      for (const waiter of this.waiters.values()) { waiter.fail(message); }
     };
 
     child.stdout.on('data', (chunk) => consume(String(chunk), false));

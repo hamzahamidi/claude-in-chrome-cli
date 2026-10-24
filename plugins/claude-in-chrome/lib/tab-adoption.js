@@ -56,6 +56,103 @@ const sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
  * interrupting a call in flight: a read-only poll is allowed to settle, which
  * keeps cancellation from inventing a new unknown-outcome class.
  */
+async function establishGroup(call, notify) {
+  const baseline = new Set();
+  const opening = await call('tabs_context_mcp', {});
+  const context = contextOf(opening);
+  const currentTabs = tabsIn(context);
+  if (currentTabs.length) {
+    for (const tab of currentTabs) baseline.add(tab.tabId);
+    const anchor = currentTabs[0].tabId;
+    notify({ kind: 'group-exists', tabs: baseline.size });
+    return { anchor, anchorCreated: false, baseline };
+  }
+
+  const made = await call('tabs_context_mcp', { createIfEmpty: true });
+  const tabs = tabsIn(contextOf(made));
+  if (!tabs.length) {
+    throw new AdoptionError(
+      'could not open a tab group for you to move a tab into', { kind: 'no-group' });
+  }
+  const anchor = tabs[0].tabId;
+  for (const tab of tabs) baseline.add(tab.tabId);
+  notify({ kind: 'anchor-created', anchor });
+  return { anchor, anchorCreated: true, baseline };
+}
+
+async function inspectCandidate(call, state, notify) {
+  const now = contextOf(await call('tabs_context_mcp', {}));
+  const currentTabs = tabsIn(now);
+  const ids = new Set(currentTabs.map((tab) => tab.tabId));
+  if (!ids.size) {
+    return replaceAnchor(call, state, notify);
+  }
+
+  const addedTabs = currentTabs.filter((tab) => !state.baseline.has(tab.tabId));
+  const candidates = addedTabs.filter((tab) => !looksInternal(tab));
+  const internals = addedTabs.filter((tab) => looksInternal(tab));
+  if (!candidates.length) {
+    state.previous = null;
+    state.announcedExtras = 0;
+    reportInternalTab(internals, state, notify);
+    return null;
+  }
+  if (candidates.length > 1) {
+    reportTooMany(candidates.length, state, notify);
+    state.previous = null;
+    return null;
+  }
+
+  state.announcedExtras = 0;
+  const candidate = candidates[0];
+  if (state.previous !== candidate.tabId) {
+    state.previous = candidate.tabId;
+    return null;
+  }
+  const probe = await call('javascript_tool', {
+    action: 'javascript_exec', tabId: candidate.tabId, text: 'String(document.title.length)',
+  });
+  if (probe.error || probe.result?.isError) {
+    notify({ kind: 'not-drivable', tab: candidate });
+    state.previous = null;
+    return null;
+  }
+  return candidate;
+}
+
+async function replaceAnchor(call, state, notify) {
+  if (state.anchor !== null) state.baseline.delete(state.anchor);
+  const fresh = contextOf(await call('tabs_context_mcp', { createIfEmpty: true }));
+  const tabs = tabsIn(fresh);
+  if (!tabs.length) {
+    throw new AdoptionError('the tab group went away and could not be reopened', { kind: 'no-group' });
+  }
+  state.anchor = tabs[0].tabId;
+  state.anchorCreated = true;
+  state.baseline.add(state.anchor);
+  state.previous = null;
+  notify({ kind: 'anchor-replaced', anchor: state.anchor });
+  return null;
+}
+
+function reportInternalTab(internals, state, notify) {
+  if (!internals.length) {
+    state.announcedInternal = null;
+    return;
+  }
+  const signature = internals.map((tab) => tab.tabId).sort().join(',');
+  if (state.announcedInternal === signature) return;
+  state.announcedInternal = signature;
+  notify({ kind: 'internal-tab', tab: internals[0] });
+}
+
+function reportTooMany(candidateCount, state, notify) {
+  if (state.announcedExtras !== candidateCount) {
+    state.announcedExtras = candidateCount;
+    notify({ kind: 'too-many', count: candidateCount });
+  }
+}
+
 async function adoptTab(session, {
   timeoutSeconds = 300,
   pollMs = DEFAULT_POLL_MS,
@@ -63,125 +160,28 @@ async function adoptTab(session, {
   cancelled = () => false,
 } = {}) {
   const call = (name, args) => session.call('tools/call', { name, arguments: args });
-
-  // ---- hold a group open, without disturbing one that already exists ------
-  let anchor = null;
-  let anchorCreated = false;
-  const baseline = new Set();
-
-  const opening = await call('tabs_context_mcp', {});
-  let context = contextOf(opening);
-
-  if (tabsIn(context).length > 0) {
-    for (const tab of tabsIn(context)) { baseline.add(tab.tabId); }
-    anchor = tabsIn(context)[0].tabId;
-    notify({ kind: 'group-exists', tabs: baseline.size });
-  } else {
-    const made = await call('tabs_context_mcp', { createIfEmpty: true });
-    context = contextOf(made);
-    if (tabsIn(context).length === 0) {
-      throw new AdoptionError(
-        'could not open a tab group for you to move a tab into', { kind: 'no-group' });
-    }
-    anchor = tabsIn(context)[0].tabId;
-    anchorCreated = true;
-    for (const tab of tabsIn(context)) { baseline.add(tab.tabId); }
-    notify({ kind: 'anchor-created', anchor });
-  }
-
+  const group = await establishGroup(call, notify);
+  const state = {
+    ...group,
+    previous: null,
+    announcedInternal: null,
+    announcedExtras: 0,
+    polls: 0,
+  };
   notify({ kind: 'waiting' });
 
-  // ---- watch for exactly one new tab that can actually be driven ----------
   const deadline = Date.now() + timeoutSeconds * 1000;
-  let previous = null;
-  let announcedInternal = null;
-  let announcedExtras = 0;
-  let polls = 0;
-
   while (Date.now() < deadline) {
-    if (cancelled()) { return { outcome: 'cancelled', anchor, anchorCreated, polls }; }
+    if (cancelled()) return { outcome: 'cancelled', anchor: state.anchor, anchorCreated: state.anchorCreated, polls: state.polls };
     await sleep(pollMs);
-    if (cancelled()) { return { outcome: 'cancelled', anchor, anchorCreated, polls }; }
-
-    polls++;
-    const now = contextOf(await call('tabs_context_mcp', {}));
-    const ids = new Set(tabsIn(now).map((tab) => tab.tabId));
-
-    // The group emptied out: whatever held it open is gone and nothing has been
-    // moved in. Replace the anchor rather than abort, since a closed id can
-    // never come back as an addition and the baseline stays sound.
-    if (ids.size === 0) {
-      if (anchor !== null) { baseline.delete(anchor); }
-      const fresh = contextOf(await call('tabs_context_mcp', { createIfEmpty: true }));
-      if (tabsIn(fresh).length === 0) {
-        throw new AdoptionError('the tab group went away and could not be reopened', { kind: 'no-group' });
-      }
-      anchor = tabsIn(fresh)[0].tabId;
-      anchorCreated = true;
-      baseline.add(anchor);
-      previous = null;
-      notify({ kind: 'anchor-replaced', anchor });
-      continue;
-    }
-
-    const addedTabs = tabsIn(now).filter((tab) => !baseline.has(tab.tabId));
-    // Only a drivable-looking tab can be ambiguous. A blank chrome:// tab can
-    // never be adopted, so it contributes no ambiguity and must not force the
-    // user through a "move the extras out" round-trip alongside a real one.
-    const candidates = addedTabs.filter((tab) => !looksInternal(tab));
-    const internals = addedTabs.filter((tab) => looksInternal(tab));
-
-    if (candidates.length === 0) {
-      previous = null;
-      announcedExtras = 0;
-      if (internals.length > 0) {
-        const signature = internals.map((tab) => tab.tabId).sort().join(',');
-        if (announcedInternal !== signature) {
-          announcedInternal = signature;
-          notify({ kind: 'internal-tab', tab: internals[0] });
-        }
-      } else {
-        announcedInternal = null;
-      }
-      continue;
-    }
-
-    if (candidates.length > 1) {
-      // Recoverable by design: say what is ambiguous and keep waiting, rather
-      // than making a human start over because they moved two tabs.
-      if (announcedExtras !== candidates.length) {
-        announcedExtras = candidates.length;
-        notify({ kind: 'too-many', count: candidates.length });
-      }
-      previous = null;
-      continue;
-    }
-    announcedExtras = 0;
-
-    const candidate = candidates[0];
-
-    // Stability first: a single reading of a set difference can catch the
-    // browser mid-move.
-    if (previous !== candidate.tabId) { previous = candidate.tabId; continue; }
-
-    // Then capability, which is what actually settles it. Read-only: it asks the
-    // page how long its title is and takes nothing out of it.
-    const probe = await call('javascript_tool', {
-      action: 'javascript_exec', tabId: candidate.tabId, text: 'String(document.title.length)',
-    });
-    if (probe.error || (probe.result && probe.result.isError)) {
-      // Not fatal. A page can be mid-load, and a candidate that cannot be driven
-      // yet is simply not adopted yet.
-      notify({ kind: 'not-drivable', tab: candidate });
-      previous = null;
-      continue;
-    }
-
-    notify({ kind: 'adopted', tab: candidate, anchor, anchorCreated });
-    return { outcome: 'adopted', tab: candidate, anchor, anchorCreated, polls };
+    if (cancelled()) return { outcome: 'cancelled', anchor: state.anchor, anchorCreated: state.anchorCreated, polls: state.polls };
+    state.polls++;
+    const candidate = await inspectCandidate(call, state, notify);
+    if (!candidate) continue;
+    notify({ kind: 'adopted', tab: candidate, anchor: state.anchor, anchorCreated: state.anchorCreated });
+    return { outcome: 'adopted', tab: candidate, anchor: state.anchor, anchorCreated: state.anchorCreated, polls: state.polls };
   }
 
-  return { outcome: 'timeout', anchor, anchorCreated, polls };
+  return { outcome: 'timeout', anchor: state.anchor, anchorCreated: state.anchorCreated, polls: state.polls };
 }
-
 module.exports = { adoptTab, AdoptionError, contextOf, tabsIn, looksInternal, DEFAULT_POLL_MS };
