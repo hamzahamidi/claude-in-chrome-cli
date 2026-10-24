@@ -110,34 +110,21 @@ jobs:
       - name: both install paths carry a working cic
         run: sh test/test_plugin_install.sh
 
-  # A separate job for one reason: id-token: write mints an OIDC token asserting
-  # this repository's identity, and the jobs above install and run third-party
-  # code. Any step in a job can request that token, so it does not belong in the
-  # same job. This one runs nothing but the upload.
-  coverage:
+  sonar:
     needs: test
-    if: always() && (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository)
+    if: needs.test.result == 'success' && (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      id-token: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/download-artifact@v4
-        id: report
-        continue-on-error: true
         with:
           name: coverage
           path: coverage
-      - name: upload coverage to Codecov
-        if: steps.report.outcome == 'success'
-        uses: codecov/codecov-action@v7
-        with:
-          use_oidc: true
-          files: ./coverage/lcov.info
-          # Pinned: the action defaults to fetching the latest CLI, so an
-          # upstream release could otherwise turn every pull request red.
-          version: v11.3.1
-          # Never soften this. An upload step that cannot fail reports success
-          # while every upload is rejected, and nobody notices for weeks.
-          fail_ci_if_error: true
+      - name: Analyze with SonarQube Cloud
+        uses: SonarSource/sonarqube-scan-action@d209202bc7d53ff1cc128f7f907dac145c9d6ae9 # v8.3.0
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
